@@ -22,7 +22,7 @@ Konflik (nyata, bukan error kutip): baseline 2024-2026 berkisar USD 469-749 jt, 
 
 Split regional Fortune 2025 [Scrape]: NA 34,10% (USD 186 jt); Eropa 27,20% (148,5 jt); APAC 20,60% (112,6 jt); AS 117,3 jt (2026); Jepang 33,6 jt (2026). Segmen 2026: web-based 55,66%; large enterprise 57,25%.
 
-Pembanding vertikal kesehatan [Snippet]: medical scheduling Fortune USD 415,33 jt (2025) → 1.269,54 jt (2034) CAGR 13,22% — https://www.fortunebusinessinsights.com/medical-scheduling-software-market-117715. Konteks atas: conversational AI ~USD 14-15 M (2025).
+Pembanding vertikal kesehatan [Snippet]: medical scheduling Fortune USD 415,33 jt (2025) → 1.269,54 jt (2034) CAGR 13,22% — https://www.fortunebusinessinsights.com/medical-scheduling-software-market-117715. Konteks atas: conversational AI ~USD 14-15 B (2025).
 
 ## 3.3 SAM/SOM — metode, bukan angka fiktif
 
@@ -45,7 +45,7 @@ Pembanding vertikal kesehatan [Snippet]: medical scheduling Fortune USD 415,33 j
 
 ## 3.6 Kontrarian
 
-- TAM absolut kecil (~USD 0,5-0,6 M) vs conversational AI (~USD 14-15 M) → nilai dari pengurangan no-show, bukan lisensi saja. [Interpretasi]
+- TAM absolut kecil (~USD 0,5-0,6 M) vs conversational AI (~USD 14-15 B) → nilai dari pengurangan no-show, bukan lisensi saja. [Interpretasi]
 - Kasus Air AI/FTC (gugatan Agu 2025, settlement Mar 2026, produk defunct) = sinyal risiko kepatuhan AI voice, bukan bukti pasar tidak layak. [Tersier — verifikasi ke ftc.gov sebelum kutip] https://www.retellai.com/blog/best-air-ai-alternative
 - Pendanaan: Heidi Health USD 88 jt total (Series B 65 jt Okt 2025); Bland USD 50 jt Series C Jun 2026 [tersier, verifikasi primer]. https://startupintros.com/orgs/heidi-health
 
