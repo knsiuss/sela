@@ -144,3 +144,13 @@ Phase 3: Qdrant extraction if justified, cross-channel template grounding, tenan
 1. Final embedding model and reranker pending latency test on target infra.
 2. Final chunk size per channel pending voice versus WhatsApp eval split.
 3. Enterprise data residency tier pending first healthcare design partner.
+
+## 14. Validation vs research (23 Sep 2026, subagent RAG)
+
+File ini DINYATAKAN valid dengan koreksi kecil:
+- pgvector default CONFIRMED (opini praktisi: start pgvector <10M chunks; dedicated bila bottleneck bernama). Hybrid FTS+vektor+RRF WAJIB untuk pricelist/FAQ (keyword-sensitive) — tambahkan ke §7.
+- Memory: LangGraph Store (`PostgresStore`, namespace `[tenant_id, user_id]`) + Collection facts ber-skema (`preferred_time`, `preferred_staff`, `language`, `channel`); thread history tetap di checkpointer; hot-path hanya preferensi eksplisit. https://docs.langchain.com/oss/javascript/concepts/memory
+- Embeddings: mulai managed kecil ATAU BGE-M3 (MIT, multilingual, dense+sparse+hybrid) bila self-host; versioned, re-embed = migrasi. https://milvus.io/blog/choose-embedding-model-rag-2026.md
+- Eval minimal sebelum tuning chunking: faithfulness + context precision/recall (Ragas). https://docs.ragas.io/en/v0.1.21/concepts/metrics/
+- Anti-pattern CONFIRMED: slot availability = tool DB query + validasi kode, JANGAN retrieval embedding (risiko hallucinated slots). LLM hanya format hasil tool.
+- Enforcement §18 tanpa Nx: `eslint-plugin-boundaries`/import + apps→packages satu arah + CI lint + CODEOWNERS; Nx `enforce-module-boundaries` hanya bila sudah Nx. https://nx.dev/docs/features/enforce-module-boundaries

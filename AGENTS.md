@@ -269,6 +269,17 @@ When facing a design choice, prefer the option that scores higher on:
 
 ---
 
+## 18. One File, One Responsibility
+
+Every file owns exactly one responsibility, named by it:
+
+1. One file = one reason to change. If a commit touches the same file for two unrelated reasons, split it.
+2. Size guides (not dogma): source file ≤300 lines, function ≤40 lines, test file mirrors one source file.
+3. Imports flow one way: `apps/*` may import from `packages/*`; `packages/*` never import from `apps/*`; packages never import each other cyclically.
+4. New shared logic starts in the app; extract to `packages/` only on second use (rule of three for abstraction, two for extraction).
+5. Test files live next to what they test (`test/<name>.test.ts` mirrors `src/<name>.ts`) and fail if the contract breaks.
+6. Docs mirror this: one doc per decision/topic (ADR), one section per concern. No mega-files.
+
 **End of AGENTS.md**
 
 > These standards are living. Propose improvements through a pull request when you find gaps.
