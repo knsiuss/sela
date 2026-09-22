@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.*
+
+# Build outputs
+dist/
+build/
+.next/
+.turbo/
+
+# Env & secrets (never commit)
+.env
+.env.local
+.env.*.local
+
+# Logs & OS
+*.log
+.DS_Store
+Thumbs.db
+
+# Tool caches
+.firecrawl/
+*.tsbuildinfo
+coverage/
