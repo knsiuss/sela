@@ -16,3 +16,10 @@ npm install
 npm test
 npm run dev -- "mau geser ke kamis sore bisa?"
 ```
+
+### Webhook ingress tests
+
+```bash
+npx vitest run test/verify.test.ts test/dedupe.test.ts
+npx tsc --noEmit
+```

@@ -70,3 +70,15 @@ Retry: exponential backoff + jitter, budget maksimal, idempotency key selalu; ci
 - GCal tulis gagal → simpan `PENDING_SYNC` + antre retry, JANGAN kirim konfirmasi final. GCal read gagal → tolak booking baru sementara + slot cached bertanda stale. (Inference — contoh nyata tak ditemukan.)
 - Alert mulai sebagai warning, kalibrasi 1-2 minggu: outbox-oldest-age, DLQ growth, webhook 5xx rate, GCal-fail streak, backup age. Paging hanya stagnasi persisten (pola `for: 30m`), bukan spike. Jangan hardcode angka domain lain sebagai SLA.
 - Compliance mapping: PDP consent→tabel consent + flag revocable; minimization→kolom seperlunya + RLS; retention→TTL job + runbook hard-delete; breach 72 jam→playbook; cross-border→region pin Indonesia; DSR 14 hari→orkestrasi multi-store. Bukan nasihat hukum.
+
+## C4 L3 per service (validasi pola produksi, Sep 2026)
+
+Topologi L2 tidak berubah — tak ada sumber yang menentangnya. Gap-nya durability, bukan topologi: Meta tak beri replay >7 hari, jadi payload mentah + outbox wajib persist sebelum/saat ACK.
+
+- Ingress: verify GET + HMAC raw-body → persist raw payload → enqueue → 200 TANPA panggil LLM/DB-vendor. Dedupe `messages[].id`. Batching maks 1000 tak dijamin; payload s.d. 3 MB.
+- Agent: worker async konsumsi queue; LLM propose saja; tanpa tulis langsung ke Meta/Calendar.
+- Writer: satu-satunya mutator booking; re-check slot segar + idempotency key 1 transaksi; tulis baris outbox atomik. Single-writer = tuntutan stop-line 0-double-book kita, bukan mandat vendor.
+- Notifier: worker terpisah drain outbox ke Meta API (retry/backoff); status `sent/delivered/read/failed` ikut timestamp, bukan urutan tiba.
+- Startup check: subscription WABA ada + raw-payload log untuk replay. Jangan hardcode throughput dari blog vendor — ukur p95 ACK + worker lag di pilot.
+
+SoT: https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/overview · https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/create-webhook-endpoint · https://hookdeck.com/webhooks/platforms/guide-to-whatsapp-webhooks-features-and-best-practices (opini vendor) · https://www.twilio.com/en-us/blog/booking-appointments-twilio-notion-fastapi (tutorial, bukan bukti produksi)
