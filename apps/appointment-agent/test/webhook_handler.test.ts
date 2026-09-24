@@ -110,6 +110,44 @@ describe("handle_inbound_request", () => {
     }
   });
 
+  it("uses webhook receipt time for retention while preserving the provider timestamp", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-24T12:00:00.000Z"));
+    const dedupe_store = new InMemoryMessageDedupe();
+    const inbound_store = new InMemoryInboundMessageStore();
+    const queue = new InMemoryWebhookQueue();
+
+    try {
+      const result = await handle_inbound_request(
+        RAW_BODY,
+        sign(RAW_BODY),
+        APP_SECRET,
+        dedupe_store,
+        queue,
+        {
+          ...ingress_options(),
+          inbound_store,
+          recipient_cipher: RECIPIENT_CIPHER,
+          retention_days: 7,
+        },
+      );
+      const row = inbound_store.all()[0];
+      const job = queue.pending_jobs()[0];
+
+      expect(result.enqueued_count).toBe(1);
+      expect(row).toMatchObject({
+        received_at: "2026-05-28T20:26:40.000Z",
+        expires_at: "2026-10-01T12:00:00.000Z",
+      });
+      expect(job?.received_at_iso).toBe("2026-09-24T12:00:00.000Z");
+      expect(JSON.stringify(row)).not.toContain("+15551234567");
+      expect(JSON.stringify(job)).not.toContain("+15551234567");
+      expect(JSON.stringify(job)).not.toContain(row?.reply_target_ciphertext);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("fails before claiming when inbound persistence has no recipient cipher", async () => {
     const dedupe_store = new InMemoryMessageDedupe();
     const inbound_store = new InMemoryInboundMessageStore();

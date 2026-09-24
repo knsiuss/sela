@@ -99,7 +99,7 @@ export class WhatsAppSender {
    *
    * @param message - Untrusted application message.
    * @param options - Optional per-call policy settings.
-   * @returns The first or cached provider result.
+   * @returns The first successful or cached provider result.
    * @throws WhatsAppSendError for validation, policy, idempotency, or transport failures.
    */
   async send(message: OutboundMessage, options: WhatsAppSendOptions = {}): Promise<SendResult> {
@@ -154,11 +154,15 @@ export class WhatsAppSender {
       if (error instanceof WhatsAppSendError) throw error;
       throw new WhatsAppSendError("transport_error", "transport", "WhatsApp transport failed");
     }
-    const wamid = require_wamid(response?.wamid);
     const status = response.status ?? "sent";
     if (status !== "sent" && status !== "failed") {
       throw new WhatsAppSendError("invalid_response", "transport", "WhatsApp transport returned an invalid status");
     }
+    if (status === "failed") {
+      // A failed disposition is not a completed send and must remain retryable.
+      throw new WhatsAppSendError("transport_error", "transport", "WhatsApp transport reported a failed send");
+    }
+    const wamid = require_wamid(response?.wamid);
     let billing = response.billing;
     if (billing !== undefined) {
       try {

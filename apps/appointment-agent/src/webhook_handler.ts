@@ -353,6 +353,7 @@ export async function handle_inbound_request(
             conversation_id,
             sender_ref: conversation_id,
             retention_days: options.retention_days,
+            now: received_at_iso,
           }),
         );
       }

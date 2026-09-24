@@ -34,7 +34,7 @@ export interface InboundMessageRecord {
   reply_target_ciphertext: string | null;
   /** Retained message text, bounded by the ingress contract. */
   message_text: string;
-  /** ISO timestamp supplied by the inbound message. */
+  /** Provider-supplied ISO timestamp retained for service-window decisions. */
   received_at: string;
   /** ISO retention deadline. */
   expires_at: string;
@@ -66,6 +66,7 @@ export function build_inbound_message_record(input: {
   conversation_id: string;
   sender_ref?: string;
   retention_days?: number;
+  /** Server receipt timestamp used as the retention base. */
   now?: string;
 }): InboundMessageRecord {
   const tenant_id = require_id(input.tenant_id, "tenant_id");
@@ -75,12 +76,17 @@ export function build_inbound_message_record(input: {
     input.recipient_cipher.encrypt(input.message.sender_phone_e164),
   );
   const received_at = valid_timestamp(input.message.sent_at_iso, "received_at");
+  // Provider clocks can be stale or ahead; retention must follow server receipt time.
+  const server_received_at = valid_timestamp(
+    input.now ?? new Date().toISOString(),
+    "server_received_at",
+  );
   const retention_days = positive_integer(
     input.retention_days ?? DEFAULT_INBOUND_RETENTION_DAYS,
     "retention_days",
   );
   const expires_at = new Date(
-    Date.parse(received_at) + retention_days * 24 * 60 * 60 * 1000,
+    Date.parse(server_received_at) + retention_days * 24 * 60 * 60 * 1000,
   ).toISOString();
   return {
     tenant_id,

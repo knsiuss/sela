@@ -159,6 +159,7 @@ export class MetaGraphTransport implements WhatsAppTransport {
         headers,
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(this.request_timeout_ms),
+        redirect: "error",
       });
     } catch (error) {
       if (is_timeout_error(error)) {
@@ -208,7 +209,7 @@ async function read_safe_upstream_code(response: Response): Promise<string | und
     for (const field of ["code", "error_subcode"]) {
       const value = payload.error[field];
       if (typeof value === "number" && Number.isSafeInteger(value)) return String(value);
-      if (typeof value === "string" && is_safe_upstream_code(value)) return value;
+      if (typeof value === "string" && /^\d{1,10}$/u.test(value)) return value;
     }
   } catch {
     return undefined;

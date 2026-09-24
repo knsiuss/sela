@@ -10,6 +10,7 @@ import type { SqlClient } from "../src/persistence/sql_client.js";
 import { AesGcmRecipientCipher } from "../src/security/recipient_cipher.js";
 
 const RECIPIENT_CIPHER = new AesGcmRecipientCipher(Buffer.alloc(32, 3));
+const SERVER_RECEIVED_AT = "2026-09-24T08:00:00.000Z";
 
 const MESSAGE: InboundMessage = {
   wamid: "wamid.inbound-test",
@@ -27,6 +28,7 @@ function record(tenant_id = "42", retention_days?: number) {
     conversation_id: "conversation-test",
     sender_ref: "sender-reference-test",
     retention_days,
+    now: SERVER_RECEIVED_AT,
   });
 }
 
@@ -64,6 +66,42 @@ describe("inbound message store", () => {
     expect(result.reply_target_ciphertext).toMatch(/^v1\./);
     expect(RECIPIENT_CIPHER.decrypt(result.reply_target_ciphertext!)).toBe(MESSAGE.sender_phone_e164);
     expect(JSON.stringify(result)).not.toContain(MESSAGE.sender_phone_e164);
+  });
+
+  it("bases retention on server receipt for stale and future provider timestamps", () => {
+    const provider_timestamps = [
+      "2026-09-01T08:00:00.000Z",
+      "2026-09-25T12:00:00.000Z",
+    ];
+
+    for (const provider_timestamp of provider_timestamps) {
+      const result = build_inbound_message_record({
+        tenant_id: "42",
+        message: { ...MESSAGE, sent_at_iso: provider_timestamp },
+        recipient_cipher: RECIPIENT_CIPHER,
+        conversation_id: "conversation-time-test",
+        retention_days: 7,
+        now: "2026-09-24T12:00:00.000Z",
+      });
+
+      expect(result.received_at).toBe(provider_timestamp);
+      expect(result.expires_at).toBe("2026-10-01T12:00:00.000Z");
+      expect(result.reply_target_ciphertext).toMatch(/^v1\./);
+      expect(RECIPIENT_CIPHER.decrypt(result.reply_target_ciphertext!)).toBe(MESSAGE.sender_phone_e164);
+      expect(JSON.stringify(result)).not.toContain(MESSAGE.sender_phone_e164);
+    }
+  });
+
+  it("rejects an invalid server receipt timestamp", () => {
+    expect(() =>
+      build_inbound_message_record({
+        tenant_id: "42",
+        message: MESSAGE,
+        recipient_cipher: RECIPIENT_CIPHER,
+        conversation_id: "conversation-time-test",
+        now: "not-a-timestamp",
+      }),
+    ).toThrow(InboundMessageStoreError);
   });
 
   it("deduplicates by tenant and wamid while allowing another tenant", async () => {

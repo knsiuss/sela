@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { InMemoryTransport, WhatsAppSender } from "@repo/wa-sender";
-import { WhatsAppSenderAdapter, OutboundDraftError } from "../src/outbound/whatsapp_sender_adapter.js";
+import { InMemoryTransport, WhatsAppSendError, WhatsAppSender } from "@repo/wa-sender";
+import { WhatsAppSenderAdapter } from "../src/outbound/whatsapp_sender_adapter.js";
 
 const DRAFT = {
   to: "+15551234567",
@@ -41,15 +41,15 @@ describe("WhatsAppSenderAdapter", () => {
     expect(transport.messages()[0]).toMatchObject({ type: "text", text: { body: "Choose a time" } });
   });
 
-  it("treats a provider failure result as a delivery failure", async () => {
+  it("propagates a provider failure as a retryable sender error", async () => {
     const sender = new WhatsAppSender({
       send: async () => ({ wamid: "wamid.failed", status: "failed" as const }),
     });
     const adapter = new WhatsAppSenderAdapter(sender);
 
-    await expect(adapter.send({ ...DRAFT, buttons: undefined })).rejects.toMatchObject({
-      code: "provider-rejected",
-    });
+    const error = await adapter.send({ ...DRAFT, buttons: undefined }).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(WhatsAppSendError);
+    expect(error).toMatchObject({ code: "transport_error" });
   });
 
   it("rejects an unconfirmed state-changing draft before transport", async () => {
@@ -58,7 +58,29 @@ describe("WhatsAppSenderAdapter", () => {
 
     await expect(
       adapter.send({ ...DRAFT, buttons: undefined, is_state_changing: true }),
-    ).rejects.toBeInstanceOf(OutboundDraftError);
+    ).rejects.toMatchObject({
+      name: "OutboundDraftError",
+      code: "state-changing-confirmation-evidence-unavailable",
+    });
+    expect(transport.messages()).toHaveLength(0);
+  });
+
+  it("fails closed when only a boolean confirmation hint is present", async () => {
+    const transport = new InMemoryTransport();
+    const sender = new WhatsAppSender(transport, { confirmation_policy: () => true });
+    const adapter = new WhatsAppSenderAdapter(sender);
+
+    await expect(
+      adapter.send({
+        ...DRAFT,
+        buttons: undefined,
+        is_state_changing: true,
+        customer_confirmed: true,
+      }),
+    ).rejects.toMatchObject({
+      name: "OutboundDraftError",
+      code: "state-changing-confirmation-evidence-unavailable",
+    });
     expect(transport.messages()).toHaveLength(0);
   });
 });

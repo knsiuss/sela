@@ -35,16 +35,27 @@ export interface JobLifecycleStore {
 
 const COMPLETE_JOB_SQL = `
   UPDATE webhook_jobs
-  SET status = 'completed', last_error = NULL
-  WHERE id = $1 AND tenant_id::text = $2
+  SET status = 'completed',
+      last_error = NULL,
+      claimed_at = NULL,
+      claim_token = NULL
+  WHERE id = $1
+    AND tenant_id::text = $2
+    AND claim_token = $3
+    AND status = 'claimed'
 `;
 
 const FAIL_JOB_SQL = `
   UPDATE webhook_jobs
   SET status = CASE WHEN $2::timestamptz IS NULL THEN 'failed' ELSE 'pending' END,
       available_at = COALESCE($2::timestamptz, available_at),
-      last_error = $3
-  WHERE id = $1 AND tenant_id::text = $4
+      last_error = $3,
+      claimed_at = NULL,
+      claim_token = NULL
+  WHERE id = $1
+    AND tenant_id::text = $4
+    AND claim_token = $5
+    AND status = 'claimed'
 `;
 
 /** Parameterized Postgres lifecycle adapter. */
@@ -67,8 +78,9 @@ export class PostgresJobLifecycleStore implements JobLifecycleStore {
    * @returns Nothing.
    */
   async complete(job: ClaimedWebhookJob): Promise<void> {
+    const claim_token = require_claim_token(job.claim_token);
     try {
-      const result = await this.sql_client.query(COMPLETE_JOB_SQL, [job.id, job.tenant_id]);
+      const result = await this.sql_client.query(COMPLETE_JOB_SQL, [job.id, job.tenant_id, claim_token]);
       ensure_write(result, "job-complete-update-failed");
     } catch (error) {
       throw new JobLifecycleError("job-complete-failed", error);
@@ -85,12 +97,14 @@ export class PostgresJobLifecycleStore implements JobLifecycleStore {
    */
   async fail(job: ClaimedWebhookJob, error_code: string, retry_at?: Date): Promise<void> {
     if (!/^[a-z0-9_]{1,64}$/.test(error_code)) throw new JobLifecycleError("job-error-code-invalid");
+    const claim_token = require_claim_token(job.claim_token);
     try {
       const result = await this.sql_client.query(FAIL_JOB_SQL, [
         job.id,
         retry_at?.toISOString() ?? null,
         error_code,
         job.tenant_id,
+        claim_token,
       ]);
       ensure_write(result, "job-fail-update-failed");
     } catch (error) {
@@ -99,16 +113,28 @@ export class PostgresJobLifecycleStore implements JobLifecycleStore {
   }
 }
 
-/** In-memory lifecycle adapter for unit tests and explicit local mode. */
-function ensure_write(result: SqlQueryResult, reason: string): void {
-  if (typeof result.rowCount === "number" && result.rowCount < 1) {
-    throw new JobLifecycleError(reason);
+/** Require a token before attempting a fenced database write. */
+function require_claim_token(value: unknown): string {
+  if (typeof value !== "string" || value.trim() === "" || value.length > 256) {
+    throw new JobLifecycleError("job-claim-token-required");
   }
-  if (result.rowCount === undefined && Array.isArray(result.rows) && result.rows.length === 0) {
-    throw new JobLifecycleError(reason);
-  }
+  return value;
 }
 
+/** Reject an update that did not match the active claim. */
+function ensure_write(result: SqlQueryResult, reason: string): void {
+  if (typeof result.rowCount === "number") {
+    if (result.rowCount < 1) throw new JobLifecycleError(reason);
+    return;
+  }
+  if (Array.isArray(result.rows)) {
+    if (result.rows.length < 1) throw new JobLifecycleError(reason);
+    return;
+  }
+  throw new JobLifecycleError(reason);
+}
+
+/** In-memory lifecycle adapter for unit tests and explicit local mode. */
 export class InMemoryJobLifecycleStore implements JobLifecycleStore {
   private readonly states = new Map<string, { status: "pending" | "completed" | "failed"; error_code?: string; retry_at?: string }>();
 

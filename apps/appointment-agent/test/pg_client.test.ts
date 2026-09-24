@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   load_pg_config,
   PgClientError,
@@ -6,21 +6,61 @@ import {
   type PgPoolLike,
 } from "../src/persistence/pg_client.js";
 
+const pool_constructor = vi.hoisted(() => vi.fn());
+vi.mock("pg", () => ({
+  Pool: class {
+    constructor(options: Record<string, unknown>) {
+      pool_constructor(options);
+    }
+
+    async query() {
+      return { rows: [], rowCount: 0 };
+    }
+
+    async end() {
+      return undefined;
+    }
+  },
+}));
+
 describe("PgSqlClient", () => {
+  beforeEach(() => {
+    pool_constructor.mockClear();
+  });
+
   it("loads bounded environment settings", () => {
     expect(
       load_pg_config({
         DATABASE_URL: "postgres://test.invalid/app",
         PG_STATEMENT_TIMEOUT_MS: "2500",
+        PG_CONNECTION_TIMEOUT_MS: "1500",
         PG_APPLICATION_NAME: "sela-test",
         PG_POOL_MAX: "4",
       }),
     ).toMatchObject({
       connection_string: "postgres://test.invalid/app",
       statement_timeout_ms: 2500,
+      connection_timeout_ms: 1500,
       application_name: "sela-test",
       max_pool_size: 4,
     });
+  });
+
+  it("passes the bounded connection timeout to the pg Pool", async () => {
+    const client = new PgSqlClient({
+      connection_string: "postgres://test.invalid/app",
+      connection_timeout_ms: 1_500,
+    });
+
+    expect(pool_constructor).toHaveBeenCalledWith(
+      expect.objectContaining({ connectionTimeoutMillis: 1_500 }),
+    );
+    await client.close();
+  });
+
+  it("rejects connection timeout values outside the supported bound", () => {
+    expect(() => load_pg_config({ PG_CONNECTION_TIMEOUT_MS: "0" })).toThrow(PgClientError);
+    expect(() => load_pg_config({ PG_CONNECTION_TIMEOUT_MS: "120001" })).toThrow(PgClientError);
   });
 
   it("delegates parameterized queries and closes the pool once", async () => {

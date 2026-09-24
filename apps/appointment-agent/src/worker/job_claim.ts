@@ -7,12 +7,14 @@ import type { QueuedWebhookJob } from "../webhook_handler.js";
 export interface ClaimedWebhookJob extends QueuedWebhookJob {
   id: string;
   attempts: number;
+  /** Opaque token fencing lifecycle writes; absent only for legacy/in-memory jobs. */
+  claim_token?: string;
 }
 
 /** Read port consumed by the worker loop. */
 export interface JobClaimer {
   /**
-   * Claim one pending job.
+   * Claim one pending job or recover one whose worker lease is stale.
    *
    * @param tenant_id - Optional tenant filter.
    * @returns The claimed job or null when the queue is empty.
@@ -29,13 +31,20 @@ export class JobClaimError extends Error {
   }
 }
 
+const CLAIM_LEASE_INTERVAL = "5 minutes";
+
 const CLAIM_ALL_SQL = `
   WITH next_job AS (
     SELECT id
     FROM webhook_jobs
-    WHERE status = 'pending'
-      AND tenant_id IS NOT NULL
-      AND available_at <= now()
+    WHERE tenant_id IS NOT NULL
+      AND (
+        (status = 'pending' AND available_at <= now())
+        OR (
+          status = 'claimed'
+          AND (claimed_at IS NULL OR claimed_at < now() - interval '${CLAIM_LEASE_INTERVAL}')
+        )
+      )
     ORDER BY created_at, id
     FOR UPDATE SKIP LOCKED
     LIMIT 1
@@ -43,20 +52,33 @@ const CLAIM_ALL_SQL = `
   UPDATE webhook_jobs AS job
   SET status = 'claimed',
       claimed_at = now(),
+      claim_token = gen_random_uuid()::text,
       attempts = attempts + 1
   FROM next_job
   WHERE job.id = next_job.id
+    AND (
+      (job.status = 'pending' AND job.available_at <= now())
+      OR (
+        job.status = 'claimed'
+        AND (job.claimed_at IS NULL OR job.claimed_at < now() - interval '${CLAIM_LEASE_INTERVAL}')
+      )
+    )
   RETURNING job.id, job.tenant_id, job.request_id, job.wamid,
-            job.conversation_id, job.received_at_iso, job.attempts
+            job.conversation_id, job.received_at_iso, job.attempts, job.claim_token
 `;
 
 const CLAIM_TENANT_SQL = `
   WITH next_job AS (
     SELECT id
     FROM webhook_jobs
-    WHERE status = 'pending'
-      AND available_at <= now()
-      AND tenant_id = $1
+    WHERE tenant_id = $1
+      AND (
+        (status = 'pending' AND available_at <= now())
+        OR (
+          status = 'claimed'
+          AND (claimed_at IS NULL OR claimed_at < now() - interval '${CLAIM_LEASE_INTERVAL}')
+        )
+      )
     ORDER BY created_at, id
     FOR UPDATE SKIP LOCKED
     LIMIT 1
@@ -64,11 +86,19 @@ const CLAIM_TENANT_SQL = `
   UPDATE webhook_jobs AS job
   SET status = 'claimed',
       claimed_at = now(),
+      claim_token = gen_random_uuid()::text,
       attempts = attempts + 1
   FROM next_job
   WHERE job.id = next_job.id
+    AND (
+      (job.status = 'pending' AND job.available_at <= now())
+      OR (
+        job.status = 'claimed'
+        AND (job.claimed_at IS NULL OR job.claimed_at < now() - interval '${CLAIM_LEASE_INTERVAL}')
+      )
+    )
   RETURNING job.id, job.tenant_id, job.request_id, job.wamid,
-            job.conversation_id, job.received_at_iso, job.attempts
+            job.conversation_id, job.received_at_iso, job.attempts, job.claim_token
 `;
 
 /** Claim one job through a parameterized Postgres statement. */
@@ -93,10 +123,10 @@ export class PostgresJobClaimer implements JobClaimer {
   }
 
   /**
-   * Atomically claim the oldest available pending job.
+   * Atomically claim the oldest available pending job or recover a stale claim.
    *
    * @param tenant_id - Optional tenant filter.
-   * @returns A normalized claimed job or null.
+   * @returns A normalized claimed job with a fresh fencing token, or null.
    * @throws JobClaimError when the query or returned row is invalid.
    */
   async claim_next_job(tenant_id?: string): Promise<ClaimedWebhookJob | null> {
@@ -129,12 +159,20 @@ function normalize_claim(result: SqlQueryResult): ClaimedWebhookJob | null {
   return {
     id,
     attempts,
+    claim_token: required_claim_token(record["claim_token"]),
     tenant_id,
     request_id: required_id(record["request_id"], "request_id"),
     wamid: required_id(record["wamid"], "wamid"),
     conversation_id: required_id(record["conversation_id"], "conversation_id"),
     received_at_iso: required_timestamp(record["received_at_iso"], "received_at_iso"),
   };
+}
+
+function required_claim_token(value: unknown): string {
+  if (typeof value !== "string" || value.trim() === "" || value.length > 256) {
+    throw new JobClaimError("job-claim-claim_token-invalid");
+  }
+  return value;
 }
 
 function required_id(value: unknown, field_name: string): string {

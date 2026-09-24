@@ -24,6 +24,11 @@ describe("idempotency", () => {
     expect(derive_idempotency_key(identity_message)).toBe(derive_idempotency_key(identity_message));
     expect(derive_idempotency_key(identity_message)).toMatch(/^wa:[a-f0-9]{64}$/u);
 
+    const max_length_identity = make_message({ inbound_wamid: "w".repeat(128), turn_id: "0" });
+    const max_length_key = derive_idempotency_key(max_length_identity);
+    expect(max_length_key).toMatch(/^wa:[a-f0-9]{64}$/u);
+    expect(is_valid_idempotency_key(max_length_key)).toBe(true);
+
     const first = make_message();
     const reordered = make_message({ idempotency_key: undefined });
     expect(fingerprint_outbound_message(first)).toBe(fingerprint_outbound_message(reordered));

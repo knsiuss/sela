@@ -52,11 +52,25 @@ Use a tenant-specific transport or sender per credential scope. Do not log the a
 
 `template_required: true` on a send, or `template_required` on the message, rejects free-form text. Outside the 24-hour customer service window, use `requires_template(now, last_inbound)` from `window.ts` to select a template.
 
-Messages marked `requires_confirmation: true` or `is_state_changing: true` are rejected unless the sender receives an explicit `confirmation_policy` that returns `true`. The default is fail-closed; a boolean flag alone is not proof of consent.
+Messages marked `requires_confirmation: true` or `is_state_changing: true` are
+rejected unless the sender receives an explicit `confirmation_policy` that
+returns `true`. The default is fail-closed; a boolean flag alone is not proof of
+consent. The appointment-agent adapter rejects state-changing drafts until it
+can verify durable, tenant- and hold-bound confirmation evidence.
 
-An explicit `idempotency_key` takes precedence. Otherwise the package hashes `inbound_wamid + turn_id`; with neither identity, it hashes canonical semantic content. The default coordinator uses a bounded, expiring in-memory store and suppresses concurrent duplicates. A different payload under the same key fails with `idempotency_conflict`.
+An explicit `idempotency_key` takes precedence and is bounded to the
+caller-supplied key contract. Application adapters should omit it when
+`inbound_wamid` and `turn_id` are available, because the package hashes that
+identity into a bounded key; with neither identity, it hashes canonical
+semantic content. The default coordinator uses a bounded, expiring in-memory
+store and suppresses concurrent duplicates. A different payload under the same
+key fails with `idempotency_conflict`.
 
-The default cache is process-local. A durable `IdempotencyPort` adapter must provide its own cross-process atomicity and namespace keys by tenant/phone number, and a process crash or uncertain upstream timeout can still leave the provider outcome unknown; callers must reconcile before retrying.
+The default cache is process-local. A transport disposition of `failed` raises
+a retryable transport error and is not cached. A durable `IdempotencyPort`
+adapter must provide its own cross-process atomicity and namespace keys by
+tenant/phone number, and a process crash or uncertain upstream timeout can still
+leave the provider outcome unknown; callers must reconcile before retrying.
 
 ## Status receipts
 

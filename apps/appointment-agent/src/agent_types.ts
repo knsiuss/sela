@@ -171,7 +171,8 @@ export function create_audit_event(input: {
  *   True when the elapsed time is within the service window.
  */
 export function is_service_window_open(last_user_message_at_ms: number, now_ms: number = Date.now()): boolean {
-  return now_ms - last_user_message_at_ms <= SERVICE_WINDOW_MS;
+  const elapsed_ms = now_ms - last_user_message_at_ms;
+  return elapsed_ms >= 0 && elapsed_ms <= SERVICE_WINDOW_MS;
 }
 
 /**

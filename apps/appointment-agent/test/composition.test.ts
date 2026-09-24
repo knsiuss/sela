@@ -42,11 +42,12 @@ describe("composition", () => {
       build_composition({
         env: {
           DATABASE_URL: "postgres://test.invalid/app",
+          USE_IN_MEMORY: "true",
           WHATSAPP_TRANSPORT: "memory",
           WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64: Buffer.alloc(32, 5).toString("base64"),
         },
       }),
-    ).toThrow("memory-transport-requires-in-memory-mode");
+    ).toThrow("DATABASE_URL and USE_IN_MEMORY=true are mutually exclusive");
   });
 
   it("fails closed when a database-backed runtime has no Meta sender credentials", () => {
@@ -66,7 +67,6 @@ describe("composition", () => {
       build_composition({
         env: {
           DATABASE_URL: "postgres://test.invalid/app",
-          USE_IN_MEMORY: "true",
         },
       }),
     ).toThrow("WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64-required");

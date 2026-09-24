@@ -94,18 +94,21 @@ the 3-second ACK SLO.
 ## Tenant-aware ingress and worker
 
 Apply `packages/db/migrations/0005_inbound_messages.sql`,
-`0006_reply_target.sql`, and `0007_inbound_button_id.sql` after
+`0006_reply_target.sql`, `0007_inbound_button_id.sql`,
+`0008_worker_tenant_hardening.sql`, and `0009_worker_leases.sql` after
 `0004_webhook_jobs.sql` before enabling the worker in a database-backed
 deployment.
 
-`DATABASE_URL` selects the Postgres composition and must use the
-`service_role` database role for server-side ingress writes. Database-backed
-mode also requires `WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64`, containing
-exactly 32 random bytes encoded as canonical base64. Keep that key stable for
-the lifetime of retained rows and load it from the deployment secret manager;
-never reuse the Meta access token as this key. `USE_IN_MEMORY=true` is an
-explicit local/test fallback only; without either setting, startup fails
-rather than silently using process memory. `APP_MODE=server` starts the HTTP server
+`DATABASE_URL` selects the Postgres composition and must use a dedicated
+server-side role with the migration-defined `service_role` grants. The pool
+uses bounded statement and connection timeouts (`PG_STATEMENT_TIMEOUT_MS` and
+`PG_CONNECTION_TIMEOUT_MS`). Database-backed mode also requires
+`WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64`, containing exactly 32 random bytes
+encoded as canonical base64. Keep that key stable for the lifetime of retained
+rows and load it from the deployment secret manager; never reuse the Meta access
+token as this key. `USE_IN_MEMORY=true` is an explicit local/test fallback only;
+it is mutually exclusive with `DATABASE_URL`, and without either setting startup
+fails rather than silently using process memory. `APP_MODE=server` starts the HTTP server
 and worker, while `APP_MODE=worker` starts only the worker. `SIGTERM` and
 `SIGINT` stop the worker, close the server, and close the pg pool.
 
@@ -154,9 +157,12 @@ composition builds `WhatsAppSenderAdapter` from `@repo/wa-sender`; explicit
 `USE_IN_MEMORY=true` selects its non-network `InMemoryTransport`, while
 `WHATSAPP_TRANSPORT=meta` requires `WHATSAPP_API_TOKEN` and
 `WHATSAPP_PHONE_NUMBER_ID`. Tests may inject an `OutboundSenderPort` directly.
-Delivery uses stable inbound-WAMID/turn keys and the sender's process-local
-idempotency coordinator; a durable cross-process idempotency adapter is still a
-follow-up.
+Delivery leaves the explicit app key unset and lets `WhatsAppSender` derive a
+bounded key from the stable inbound WAMID and turn ordinal. The sender's
+idempotency coordinator remains process-local; a durable cross-process
+idempotency adapter is still a follow-up. The adapter also rejects
+state-changing drafts until a durable tenant- and hold-bound confirmation
+evidence port is available.
 
 Set `TENANT_ID` for a non-default runtime tenant. The CLI uses a single
 in-process package service for the local scaffold; production persistence and
@@ -179,6 +185,16 @@ pnpm --filter appointment-agent test
 
 The worker and ingress tests use injected SQL/pool doubles; no live database or
 Meta call is made by the test suite.
+
+### Production blockers still open
+
+This hardening pass does not make the database-backed worker pilot-ready yet. Before production enablement, the repository still needs:
+
+- tenant/conversation-scoped session storage and button-action routing;
+- an atomic ingress transaction/outbox and durable reconciliation;
+- a durable tenant-scoped calendar writer (the current default is local scaffold);
+- tenant-specific Meta credentials and a durable outbound idempotency/status ledger;
+- live Postgres/Supabase RLS, role, and TLS verification.
 
 Meta transport and customer-service-window behavior follow the official
 Cloud API documentation: https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/send-messages

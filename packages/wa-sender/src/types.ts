@@ -94,7 +94,7 @@ export interface OutboundMessage {
   buttons?: readonly OutboundButton[];
   /** Interactive reply-button payload for a service-window message. */
   interactive?: InteractivePayload;
-  /** Stable key for one logical outbound operation. */
+  /** Optional bounded caller key; omit it to derive one from inbound identity. */
   idempotency_key?: string;
   /** Stable inbound WAMID used to derive a key when turn_id is available. */
   inbound_wamid?: string;

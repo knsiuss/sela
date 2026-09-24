@@ -8,7 +8,7 @@ import {
 import type { OutboundSenderPort } from "../worker/loop.js";
 import type { OutboundDraft } from "../worker/process_job.js";
 
-/** Safe adapter failure for a draft shape the current sender cannot represent. */
+/** Safe adapter failure for an unsupported or unsafe outbound draft. */
 export class OutboundDraftError extends Error {
   /** Stable machine-readable adapter failure code. */
   readonly code: string;
@@ -38,24 +38,23 @@ export class WhatsAppSenderAdapter implements OutboundSenderPort {
    * Send one draft without logging its transient recipient.
    *
    * Buttons become Meta interactive reply buttons, which are valid for service
-   * messages inside the customer-service window. A future state-changing draft
-   * must carry both the state-changing marker and explicit customer consent.
+   * messages inside the customer-service window. State-changing drafts remain
+   * blocked until a durable tenant- and hold-bound confirmation evidence port
+   * exists; a boolean flag is not proof of confirmation.
    *
    * @param draft - Worker-produced outbound draft.
    * @returns Sender acknowledgement.
-   * @throws OutboundDraftError for unsupported or unconfirmed state changes.
+   * @throws OutboundDraftError for unsupported drafts or state-changing sends without durable evidence.
    */
   async send(draft: OutboundDraft): Promise<unknown> {
     if (draft.message_type === "template") {
       throw new OutboundDraftError("template-draft-not-configured");
     }
-    if (draft.is_state_changing === true && draft.customer_confirmed !== true) {
-      throw new OutboundDraftError("customer-confirmation-required");
+    if (draft.is_state_changing === true) {
+      throw new OutboundDraftError("state-changing-confirmation-evidence-unavailable");
     }
     const message = to_outbound_message(draft);
-    const result = await this.sender.send(message, draft.is_state_changing === true
-      ? { confirmation_policy: () => true }
-      : undefined);
+    const result = await this.sender.send(message);
     if (is_record(result) && result.status === "failed") {
       throw new OutboundDraftError("provider-rejected");
     }

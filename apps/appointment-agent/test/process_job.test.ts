@@ -100,7 +100,6 @@ describe("process_job", () => {
         to: RECIPIENT_PHONE,
         message_type: "text",
         text: "We received your request. Our team will follow up with the next step.",
-        idempotency_key: `${JOB.wamid}:0`,
         inbound_wamid: JOB.wamid,
         turn_id: "0",
       },
@@ -115,6 +114,25 @@ describe("process_job", () => {
     const graph_state = vi.mocked(dependencies.graph.invoke).mock.calls[0]?.[0];
     expect(JSON.stringify(graph_state)).not.toContain(RECIPIENT_PHONE);
     expect(JSON.stringify(graph_state)).not.toContain(RECORD.reply_target_ciphertext!);
+  });
+
+  it("leaves max-length WAMID idempotency derivation to the sender", async () => {
+    const max_length_wamid = `wamid-${"x".repeat(122)}`;
+    const max_length_job = { ...JOB, wamid: max_length_wamid };
+    const max_length_record = { ...RECORD, wamid: max_length_wamid };
+    const dependencies = make_dependencies({ record: max_length_record });
+
+    const drafts = await process_job({
+      job: max_length_job,
+      inbound_loader: dependencies.loader,
+      recipient_cipher: dependencies.recipient_cipher,
+      calendar: dependencies.calendar,
+      lifecycle: dependencies.lifecycle,
+      graph_runner: dependencies.graph,
+    });
+
+    expect(drafts[0]).toMatchObject({ inbound_wamid: max_length_wamid, turn_id: "0" });
+    expect(drafts[0]).not.toHaveProperty("idempotency_key");
   });
 
   it("passes a persisted button action into the graph state", async () => {
@@ -185,6 +203,24 @@ describe("process_job", () => {
       is_skipped: true,
     });
     expect(dependencies.lifecycle.fail).toHaveBeenCalledWith(JOB, "missing_inbound_message");
+    expect(dependencies.graph.invoke).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for an unreasonably future-dated inbound timestamp", async () => {
+    const dependencies = make_dependencies({
+      record: { ...RECORD, received_at: "2026-09-26T12:10:00.000Z" },
+    });
+    await expect(
+      process_job({
+        job: JOB,
+        inbound_loader: dependencies.loader,
+        recipient_cipher: dependencies.recipient_cipher,
+        calendar: dependencies.calendar,
+        lifecycle: dependencies.lifecycle,
+        graph_runner: dependencies.graph,
+        clock: () => new Date("2026-09-26T12:00:00.000Z"),
+      }),
+    ).rejects.toMatchObject({ code: "inbound_timestamp_in_future", is_skipped: true });
     expect(dependencies.graph.invoke).not.toHaveBeenCalled();
   });
 

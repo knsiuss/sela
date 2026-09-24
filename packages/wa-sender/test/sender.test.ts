@@ -47,6 +47,30 @@ describe("WhatsAppSender", () => {
     expect(transport.send).toHaveBeenCalledWith(expect.objectContaining({ idempotency_key: first.idempotency_key }));
   });
 
+  it("does not cache a failed transport result and permits a retry", async () => {
+    const transport = {
+      send: vi.fn()
+        .mockResolvedValueOnce({ wamid: "wamid-failed", status: "failed" as const })
+        .mockResolvedValueOnce({ wamid: "wamid-sent", status: "sent" as const }),
+    };
+    const sender = new WhatsAppSender(transport);
+    const message: OutboundMessage = {
+      to: "+12025550100",
+      type: "text",
+      text: { body: "Retryable message" },
+      inbound_wamid: "inbound-retry",
+      turn_id: "reply-1",
+    };
+
+    await expect(sender.send(message)).rejects.toMatchObject({
+      name: "WhatsAppSendError",
+      code: "transport_error",
+      operation: "transport",
+    });
+    await expect(sender.send(message)).resolves.toMatchObject({ status: "sent", wamid: "wamid-sent" });
+    expect(transport.send).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects free-form text when the caller requires a template", async () => {
     const transport = make_transport();
     const sender = new WhatsAppSender(transport, { template_required: true });
@@ -188,6 +212,31 @@ describe("MetaGraphTransport", () => {
       expect(String((error as WhatsAppSendError).message)).not.toContain("private");
     }
     expect(fetch_mock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not expose token-shaped provider error codes", async () => {
+    const token_shaped_code = "EAA-secret-token-value";
+    const fetch_mock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { code: token_shaped_code, error_subcode: token_shaped_code } }),
+        { status: 400 },
+      ),
+    );
+    const transport = new MetaGraphTransport({
+      graph_api_url: "https://graph.example.test/v1.0",
+      phone_number_id: "phone-token-code",
+      access_token: TEST_TOKEN,
+      fetch: fetch_mock,
+    });
+
+    try {
+      await transport.send({ to: "+12025550100", type: "text", text: { body: "Hello" } });
+      throw new Error("expected upstream failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(WhatsAppSendError);
+      expect((error as WhatsAppSendError).upstream_code).toBeUndefined();
+      expect(JSON.stringify(error)).not.toContain(token_shaped_code);
+    }
   });
 
   it("translates timeout and malformed response failures", async () => {

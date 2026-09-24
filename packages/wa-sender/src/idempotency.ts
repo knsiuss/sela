@@ -84,8 +84,9 @@ export type IdempotencyPort<T> = IdempotencyStore<T>;
  * Derive a deterministic key from an explicit key, inbound identity, or content.
  *
  * Explicit keys are validated and returned unchanged. A WAMID plus turn ID is
- * preferred for replies. When neither is available, a canonical semantic
- * content hash is used, excluding routing and idempotency metadata.
+ * preferred for replies and is hashed to keep the generated key bounded. When
+ * neither is available, a canonical semantic content hash is used, excluding
+ * routing and idempotency metadata.
  *
  * @param input - Message and optional identity metadata.
  * @returns A safe, stable key.

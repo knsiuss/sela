@@ -34,6 +34,9 @@ export const DEFAULT_WHATSAPP_GRAPH_API_URL = "https://graph.facebook.com/v23.0"
 export function build_runtime_sender(
   env: Record<string, string | undefined> = process.env,
 ): OutboundSenderPort {
+  if (env["USE_IN_MEMORY"] === "true" && typeof env["DATABASE_URL"] === "string" && env["DATABASE_URL"].trim() !== "") {
+    throw new RuntimeSenderConfigurationError("database-and-in-memory-mode-are-mutually-exclusive");
+  }
   const configured_mode = env["WHATSAPP_TRANSPORT"]?.trim();
   const mode = configured_mode === undefined || configured_mode === ""
     ? (env["USE_IN_MEMORY"] === "true" ? "memory" : "meta")

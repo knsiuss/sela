@@ -102,6 +102,9 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
   if (!has_database_url && !use_in_memory) {
     throw new CompositionConfigurationError("DATABASE_URL is required unless USE_IN_MEMORY=true");
   }
+  if (has_database_url && use_in_memory) {
+    throw new CompositionConfigurationError("DATABASE_URL and USE_IN_MEMORY=true are mutually exclusive");
+  }
   const recipient_cipher = resolve_recipient_cipher(
     env,
     has_database_url,

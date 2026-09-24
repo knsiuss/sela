@@ -46,4 +46,11 @@ describe("postgres_message_dedupe", () => {
     const conflict_store = new PostgresMessageDedupe({ query: conflict_query } satisfies SqlClient);
     expect(await conflict_store.try_claim("wamid.conflict")).toBe(false);
   });
+
+  it("fails closed when a release result has no verifiable metadata", async () => {
+    const store = new PostgresMessageDedupe({ query: vi.fn(async () => ({})) } satisfies SqlClient);
+    await expect(store.release_claim("wamid.invalid-result")).rejects.toMatchObject({
+      name: "DedupeStoreError",
+    });
+  });
 });

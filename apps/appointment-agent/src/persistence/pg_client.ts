@@ -3,6 +3,9 @@
 import { Pool } from "pg";
 import type { SqlClient, SqlQueryResult } from "./sql_client.js";
 
+/** Default bounded timeout for establishing or checking out a pg connection. */
+const DEFAULT_CONNECTION_TIMEOUT_MS = 5_000;
+
 /** Minimal pool surface used by the client and deterministic tests. */
 export interface PgPoolLike {
   query(sql: string, values?: readonly unknown[]): Promise<{ rows: unknown[]; rowCount?: number | null }>;
@@ -22,6 +25,7 @@ export class PgClientError extends Error {
 export interface PgClientConfig {
   connection_string?: string;
   statement_timeout_ms: number;
+  connection_timeout_ms: number;
   application_name: string;
   max_pool_size: number;
 }
@@ -46,6 +50,10 @@ export function load_pg_config(
     env["PG_STATEMENT_TIMEOUT_MS"] ?? env["DATABASE_STATEMENT_TIMEOUT_MS"] ?? "10000",
     "PG_STATEMENT_TIMEOUT_MS",
   );
+  const connection_timeout_ms = parse_positive_integer(
+    env["PG_CONNECTION_TIMEOUT_MS"] ?? env["DATABASE_CONNECTION_TIMEOUT_MS"] ?? String(DEFAULT_CONNECTION_TIMEOUT_MS),
+    "PG_CONNECTION_TIMEOUT_MS",
+  );
   const max_pool_size = parse_positive_integer(
     env["PG_POOL_MAX"] ?? env["DATABASE_POOL_MAX"] ?? "10",
     "PG_POOL_MAX",
@@ -57,6 +65,7 @@ export function load_pg_config(
   return {
     connection_string: env["DATABASE_URL"],
     statement_timeout_ms,
+    connection_timeout_ms,
     application_name,
     max_pool_size,
   };
@@ -78,6 +87,10 @@ export class PgSqlClient implements SqlClient {
       options.statement_timeout_ms ?? 10_000,
       "statement_timeout_ms",
     );
+    const connection_timeout_ms = positive_integer(
+      options.connection_timeout_ms ?? DEFAULT_CONNECTION_TIMEOUT_MS,
+      "connection_timeout_ms",
+    );
     const application_name = options.application_name ?? "sela-appointment-agent";
     if (application_name.trim() === "" || application_name.length > 128) {
       throw new PgClientError("postgres-application-name-invalid");
@@ -94,6 +107,7 @@ export class PgSqlClient implements SqlClient {
     this.pool = new Pool({
       connectionString: connection_string,
       statement_timeout: statement_timeout_ms,
+      connectionTimeoutMillis: connection_timeout_ms,
       application_name: application_name,
       max: max_pool_size,
     });

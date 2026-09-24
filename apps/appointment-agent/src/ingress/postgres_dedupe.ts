@@ -138,7 +138,10 @@ export class PostgresMessageDedupe implements MessageDedupeStore {
 
   private async execute_write(sql: string, values: readonly unknown[]): Promise<void> {
     try {
-      await this.require_client().query(sql, values);
+      const result = await this.require_client().query(sql, values);
+      if (!Array.isArray(result.rows) && typeof result.rowCount !== "number") {
+        throw new Error("invalid-sql-result");
+      }
     } catch (error) {
       if (error instanceof DedupeStoreError) throw error;
       throw new DedupeStoreError("postgres-dedupe-query-failed", error);

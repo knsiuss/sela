@@ -15,6 +15,8 @@ import type { InboundLoader } from "./inbound_loader.js";
 import type { ClaimedWebhookJob } from "./job_claim.js";
 import type { JobLifecycleStore } from "./job_store.js";
 
+const MAX_INBOUND_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
 /** Local draft contract intentionally independent of the outbound package. */
 export interface OutboundDraft {
   /** Transient E.164 recipient; use only for sender handoff, never log or persist it. */
@@ -22,15 +24,15 @@ export interface OutboundDraft {
   message_type: "text" | "template";
   text: string;
   buttons?: OutboundDraftButton[];
-  /** Stable key for one logical outbound operation. */
+  /** Optional caller-supplied key; the worker leaves it unset for sender derivation. */
   idempotency_key?: string;
-  /** Stable inbound WAMID used to derive the key. */
+  /** Stable inbound WAMID used by the sender to derive a bounded key. */
   inbound_wamid?: string;
   /** Turn ordinal for multiple drafts from one inbound message. */
   turn_id?: string;
   /** Marks a future outbound operation that changes provider state. */
   is_state_changing?: boolean;
-  /** Explicit customer confirmation gate for a state-changing operation. */
+  /** Local state hint; it is not durable confirmation evidence. */
   customer_confirmed?: boolean;
 }
 
@@ -135,7 +137,12 @@ export async function process_job(input: ProcessJobInput): Promise<OutboundDraft
     await input.lifecycle.fail(input.job, "invalid_inbound_received_at");
     throw new JobProcessingError("invalid_inbound_received_at", true);
   }
-  if (clock().getTime() - received_ms > SERVICE_WINDOW_MS) {
+  const now_ms = clock().getTime();
+  if (received_ms > now_ms + MAX_INBOUND_CLOCK_SKEW_MS) {
+    await input.lifecycle.fail(input.job, "inbound_timestamp_in_future");
+    throw new JobProcessingError("inbound_timestamp_in_future", true);
+  }
+  if (now_ms - received_ms > SERVICE_WINDOW_MS) {
     await input.lifecycle.fail(input.job, "service_window_expired");
     throw new JobProcessingError("service_window_expired", true);
   }
@@ -158,7 +165,6 @@ export async function process_job(input: ProcessJobInput): Promise<OutboundDraft
     const final_state = await graph.invoke(build_initial_state(input.job, inbound_message));
     const drafts = build_outbound_drafts(final_state, reply_target).map((draft, index) => ({
       ...draft,
-      idempotency_key: `${input.job.wamid}:${index}`,
       inbound_wamid: input.job.wamid,
       turn_id: String(index),
     }));

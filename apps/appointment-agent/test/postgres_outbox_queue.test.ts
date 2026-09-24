@@ -44,6 +44,22 @@ describe("postgres_webhook_job_queue", () => {
     }
   });
 
+  it("fails closed when the database result cannot prove query completion", async () => {
+    for (const result of [{}, { rowCount: null }]) {
+      const query = vi.fn(async () => result);
+      const queue = new PostgresWebhookJobQueue({ query } satisfies SqlClient);
+      await expect(queue.enqueue(JOB)).rejects.toBeInstanceOf(WebhookJobQueueError);
+    }
+  });
+
+  it("rejects a job without tenant scope before querying the database", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    const queue = new PostgresWebhookJobQueue({ query } satisfies SqlClient);
+    const { tenant_id: _tenant_id, ...without_tenant } = JOB;
+    await expect(queue.enqueue(without_tenant)).rejects.toBeInstanceOf(InvalidWebhookJobError);
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it("rejects an invalid job before querying the database", async () => {
     const query = vi.fn(async () => ({ rows: [] }));
     const queue = new PostgresWebhookJobQueue({ query } satisfies SqlClient);
