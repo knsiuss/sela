@@ -3,7 +3,12 @@ import type { InboundMessageRecord } from "../src/ingress/inbound_store.js";
 import { AesGcmRecipientCipher } from "../src/security/recipient_cipher.js";
 import type { AppointmentStateType } from "../src/state.js";
 import type { CalendarPort } from "../src/tools/calendar.js";
-import { JobProcessingError, process_job, type GraphRunner } from "../src/worker/process_job.js";
+import {
+  JobProcessingError,
+  process_job,
+  type GraphRunner,
+  type TurnProcessor,
+} from "../src/worker/process_job.js";
 import type { JobLifecycleStore } from "../src/worker/job_store.js";
 import type { InboundLoader } from "../src/worker/inbound_loader.js";
 import type { ClaimedWebhookJob } from "../src/worker/job_claim.js";
@@ -114,6 +119,41 @@ describe("process_job", () => {
     const graph_state = vi.mocked(dependencies.graph.invoke).mock.calls[0]?.[0];
     expect(JSON.stringify(graph_state)).not.toContain(RECIPIENT_PHONE);
     expect(JSON.stringify(graph_state)).not.toContain(RECORD.reply_target_ciphertext!);
+  });
+
+  it("uses an injected turn processor before delivery without invoking the legacy graph", async () => {
+    const dependencies = make_dependencies();
+    const deliver = vi.fn(async () => undefined);
+    const turn_processor: TurnProcessor = {
+      process: vi.fn(async () => [{
+        to: RECIPIENT_PHONE,
+        message_type: "text" as const,
+        text: "Choose a current time.",
+      }]),
+    };
+
+    const drafts = await process_job({
+      job: JOB,
+      inbound_loader: dependencies.loader,
+      recipient_cipher: dependencies.recipient_cipher,
+      calendar: dependencies.calendar,
+      lifecycle: dependencies.lifecycle,
+      graph_runner: dependencies.graph,
+      turn_processor,
+      deliver,
+    });
+
+    expect(turn_processor.process).toHaveBeenCalledWith(expect.objectContaining({
+      tenant_id: "42",
+      conversation_id: RECORD.conversation_id,
+      wamid: RECORD.wamid,
+      reply_target: RECIPIENT_PHONE,
+      message: expect.objectContaining({ button_id: undefined, text_body: RECORD.message_text }),
+    }));
+    expect(dependencies.graph.invoke).not.toHaveBeenCalled();
+    expect(deliver).toHaveBeenCalledWith([expect.objectContaining({ inbound_wamid: JOB.wamid, turn_id: "0" })]);
+    expect(drafts).toEqual([expect.objectContaining({ inbound_wamid: JOB.wamid, turn_id: "0" })]);
+    expect(dependencies.lifecycle.complete).toHaveBeenCalledWith(JOB);
   });
 
   it("leaves max-length WAMID idempotency derivation to the sender", async () => {

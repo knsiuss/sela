@@ -1,4 +1,5 @@
 import { Annotation } from "@langchain/langgraph";
+import type { RetainedInboundMessage } from "./agent_types.js";
 
 export type Intent = "confirm" | "cancel" | "reschedule" | "book" | "unknown";
 
@@ -36,3 +37,30 @@ export const AppointmentState = Annotation.Root({
 });
 
 export type AppointmentStateType = typeof AppointmentState.State;
+
+/**
+ * Create the existing graph's initial state for one validated inbound turn.
+ *
+ * @param conversation_id - Tenant-scoped opaque conversation identifier.
+ * @param message - Retained text and optional validated button id.
+ * @returns Fresh graph state with no choice, hold, confirmation, or handoff.
+ */
+export function create_initial_appointment_state(
+  conversation_id: string,
+  message: Pick<RetainedInboundMessage, "text_body" | "button_id">,
+): AppointmentStateType {
+  return {
+    conversation_id,
+    raw_message: message.text_body,
+    button_id: message.button_id,
+    intent: "unknown",
+    confidence: 0,
+    candidate_slots: [],
+    chosen_slot_id: undefined,
+    hold: undefined,
+    customer_confirmed: false,
+    needs_human: false,
+    human_summary: undefined,
+    done: false,
+  };
+}

@@ -67,6 +67,17 @@ describe("slot service adapter", () => {
     }
   });
 
+  it("replays the same live hold for a stable hold idempotency key", async () => {
+    const adapter = make_adapter(new SlotService(), TENANT_A, [SLOT_ONE, SLOT_TWO]);
+    const first = await adapter.hold_slot(SLOT_ONE.id, 300, "hold-retry-key");
+    const replay = await adapter.hold_slot(SLOT_ONE.id, 300, "hold-retry-key");
+
+    expect(replay).toEqual(first);
+    await expect(adapter.hold_slot(SLOT_TWO.id, 300, "hold-retry-key")).rejects.toBeInstanceOf(
+      SlotUnavailableError,
+    );
+  });
+
   it("returns the same appointment for an idempotent confirm retry", async () => {
     const test_clock = make_clock();
     const service = new SlotService({ clock: test_clock.clock });

@@ -6,7 +6,7 @@ import {
   type RetainedInboundMessage,
 } from "../agent_types.js";
 import { build_graph } from "../graph.js";
-import type { AppointmentStateType } from "../state.js";
+import { create_initial_appointment_state, type AppointmentStateType } from "../state.js";
 import { build_outbound_drafts } from "../outbound/reply_builder.js";
 import type { CalendarPort } from "../tools/calendar.js";
 import type { InboundMessageRecord } from "../ingress/inbound_store.js";
@@ -54,6 +54,27 @@ export interface GraphRunner {
   invoke(state: AppointmentStateType): Promise<AppointmentStateType>;
 }
 
+/** One validated inbound turn after transient recipient decryption. */
+export interface TurnProcessorInput {
+  tenant_id: string;
+  conversation_id: string;
+  wamid: string;
+  /** Transient E.164 recipient; processors must never persist it. */
+  reply_target: string;
+  message: RetainedInboundMessage;
+}
+
+/** Injectable stateful turn boundary used by the default composition. */
+export interface TurnProcessor {
+  /**
+   * Process one tenant/conversation turn before sender delivery.
+   *
+   * @param input - Validated retained turn and transient decrypted recipient.
+   * @returns Customer-safe drafts; persistence and calendar effects are processor-owned.
+   */
+  process(input: TurnProcessorInput): Promise<OutboundDraft[]>;
+}
+
 /** A sanitized processing failure with retry classification. */
 export class JobProcessingError extends Error {
   /** Stable sanitized failure code. */
@@ -78,6 +99,8 @@ export interface ProcessJobInput {
   calendar: CalendarPort;
   lifecycle: JobLifecycleStore;
   graph_runner?: GraphRunner;
+  /** Stateful turn boundary; when omitted, the legacy graph path remains active. */
+  turn_processor?: TurnProcessor;
   /** Delivers drafts before the inbound row and job are marked processed. */
   deliver?: (drafts: readonly OutboundDraft[]) => Promise<void>;
   max_attempts?: number;
@@ -88,8 +111,8 @@ export interface ProcessJobInput {
  * Load, process, and complete one claimed job.
  *
  * The loader is always tenant-scoped. A missing, expired, or legacy row without
- * an encrypted reply target is a terminal skip. Graph failures are retried with
- * bounded exponential backoff; raw errors are reduced to stable codes before
+ * an encrypted reply target is a terminal skip. Turn/graph failures are retried
+ * with bounded exponential backoff; raw errors are reduced to stable codes before
  * persistence.
  *
  * @param input - Claimed job and injected processing boundaries.
@@ -161,13 +184,7 @@ export async function process_job(input: ProcessJobInput): Promise<OutboundDraft
 
   try {
     const inbound_message = to_inbound_message(record);
-    const graph = input.graph_runner ?? build_graph(input.calendar);
-    const final_state = await graph.invoke(build_initial_state(input.job, inbound_message));
-    const drafts = build_outbound_drafts(final_state, reply_target).map((draft, index) => ({
-      ...draft,
-      inbound_wamid: input.job.wamid,
-      turn_id: String(index),
-    }));
+    const drafts = await build_turn_drafts(input, inbound_message, reply_target);
     if (input.deliver !== undefined) await input.deliver(drafts);
     await mark_processed(input.inbound_loader, record, clock);
     await input.lifecycle.complete(input.job);
@@ -177,6 +194,37 @@ export async function process_job(input: ProcessJobInput): Promise<OutboundDraft
     await fail_with_retry(input, code);
     throw new JobProcessingError(code);
   }
+}
+
+async function build_turn_drafts(
+  input: ProcessJobInput,
+  message: RetainedInboundMessage,
+  reply_target: string,
+): Promise<OutboundDraft[]> {
+  const drafts = input.turn_processor === undefined
+    ? await run_legacy_graph(input, message, reply_target)
+    : await input.turn_processor.process({
+        tenant_id: input.job.tenant_id!,
+        conversation_id: input.job.conversation_id,
+        wamid: input.job.wamid,
+        reply_target,
+        message,
+      });
+  return drafts.map((draft, index) => ({
+    ...draft,
+    inbound_wamid: input.job.wamid,
+    turn_id: String(index),
+  }));
+}
+
+async function run_legacy_graph(
+  input: ProcessJobInput,
+  message: RetainedInboundMessage,
+  reply_target: string,
+): Promise<OutboundDraft[]> {
+  const graph = input.graph_runner ?? build_graph(input.calendar);
+  const final_state = await graph.invoke(create_initial_appointment_state(input.job.conversation_id, message));
+  return build_outbound_drafts(final_state, reply_target);
 }
 
 async function complete_or_retry(input: ProcessJobInput): Promise<void> {
@@ -219,23 +267,6 @@ function to_inbound_message(record: InboundMessageRecord): RetainedInboundMessag
   });
   if (!parsed.success) throw new JobProcessingError("invalid_inbound_message");
   return parsed.data;
-}
-
-function build_initial_state(job: ClaimedWebhookJob, message: RetainedInboundMessage): AppointmentStateType {
-  return {
-    conversation_id: job.conversation_id,
-    raw_message: message.text_body,
-    button_id: message.button_id,
-    intent: "unknown",
-    confidence: 0,
-    candidate_slots: [],
-    chosen_slot_id: undefined,
-    hold: undefined,
-    customer_confirmed: false,
-    needs_human: false,
-    human_summary: undefined,
-    done: false,
-  };
 }
 
 function retry_time(now: Date, attempts: number): Date {

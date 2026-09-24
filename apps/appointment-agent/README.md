@@ -95,9 +95,9 @@ the 3-second ACK SLO.
 
 Apply `packages/db/migrations/0005_inbound_messages.sql`,
 `0006_reply_target.sql`, `0007_inbound_button_id.sql`,
-`0008_worker_tenant_hardening.sql`, and `0009_worker_leases.sql` after
-`0004_webhook_jobs.sql` before enabling the worker in a database-backed
-deployment.
+`0008_worker_tenant_hardening.sql`, `0009_worker_leases.sql`, and
+`0010_reschedule_sessions.sql` after `0004_webhook_jobs.sql` before enabling
+multi-turn rescheduling in a database-backed deployment.
 
 `DATABASE_URL` selects the Postgres composition and must use a dedicated
 server-side role with the migration-defined `service_role` grants. The pool
@@ -131,9 +131,10 @@ decrypts the reply target only while constructing the outbound draft, invokes
 the graph, delivers the outbound drafts, then marks the inbound row processed
 and completes the job. A delivery failure leaves the inbound row unprocessed
 and uses bounded exponential `available_at` retries; `WORKER_MAX_ATTEMPTS`
-controls the terminal failure boundary. Inbound `button_id` values are retained
-for the next deterministic session-flow milestone; this cutover does not yet
-turn a button tap into a calendar write. Replies older than the 24-hour customer
+controls the terminal failure boundary. Inbound `button_id` values are routed
+only when they exactly match the current tenant/conversation offer generation.
+The session store retains bounded slot/phase state but never raw message text,
+sender references, or recipients. Replies older than the 24-hour customer
 service window are skipped until an approved template path is wired.
 
 The default retention is 30 days and can be changed with
@@ -165,9 +166,12 @@ state-changing drafts until a durable tenant- and hold-bound confirmation
 evidence port is available.
 
 Set `TENANT_ID` for a non-default runtime tenant. The CLI uses a single
-in-process package service for the local scaffold; production persistence and
-calendar-provider integration are outside this cutover. Runtime slots use
-opaque staff/provider ids; `resource` retains the display label.
+in-process package service for the local scaffold. The default composition
+caches one `SlotServiceAdapter` per tenant only inside that worker process, so
+a hold survives separate local jobs but is not durable across processes.
+Production calendar persistence/provider integration remains outside this
+cutover. Runtime slots use opaque staff/provider ids; `resource` retains the
+display label.
 
 The cross-tenant CLI path defaults to `CROSS_TENANT_CONSENT_GRANTED=false`
 and `CROSS_TENANT_AUTHZ_GRANTED=false`, with an empty in-memory provider. The
@@ -190,9 +194,9 @@ Meta call is made by the test suite.
 
 This hardening pass does not make the database-backed worker pilot-ready yet. Before production enablement, the repository still needs:
 
-- tenant/conversation-scoped session storage and button-action routing;
 - an atomic ingress transaction/outbox and durable reconciliation;
 - a durable tenant-scoped calendar writer (the current default is local scaffold);
+- an atomic reschedule contract that replaces the existing appointment; the current flow confirms a selected hold but has no old appointment target;
 - tenant-specific Meta credentials and a durable outbound idempotency/status ledger;
 - live Postgres/Supabase RLS, role, and TLS verification.
 

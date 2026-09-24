@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { build_composition, CompositionConfigurationError } from "../src/composition.js";
+import { PostgresRescheduleSessionStore } from "../src/reschedule/postgres_session_store.js";
+import { InMemoryRescheduleSessionStore } from "../src/reschedule/session_store.js";
 
 describe("composition", () => {
   it("fails closed when neither Postgres nor explicit in-memory mode is configured", () => {
@@ -18,6 +20,7 @@ describe("composition", () => {
       },
     });
 
+    expect(composition.reschedule_session_store).toBeInstanceOf(InMemoryRescheduleSessionStore);
     await expect(composition.tenant_resolver.resolve("phone-local")).resolves.toBe("42");
     await expect(composition.tenant_resolver.resolve("phone-other")).resolves.toBeNull();
     const ciphertext = composition.recipient_cipher.encrypt("+12025550123");
@@ -60,6 +63,19 @@ describe("composition", () => {
         },
       }),
     ).toThrow("WHATSAPP_API_TOKEN-required");
+  });
+
+  it("selects the Postgres session store in database-backed mode", async () => {
+    const composition = build_composition({
+      env: {
+        DATABASE_URL: "postgres://test.invalid/app",
+        WHATSAPP_PHONE_NUMBER_ID: "phone-test",
+        WHATSAPP_API_TOKEN: "configured-test-token",
+        WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64: Buffer.alloc(32, 4).toString("base64"),
+      },
+    });
+    expect(composition.reschedule_session_store).toBeInstanceOf(PostgresRescheduleSessionStore);
+    await composition.stop();
   });
 
   it("requires a production recipient key whenever Postgres is configured", () => {

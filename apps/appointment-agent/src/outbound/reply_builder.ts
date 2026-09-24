@@ -6,6 +6,25 @@ import type { AppointmentStateType, TimeSlot } from "../state.js";
 import type { OutboundDraft, OutboundDraftButton } from "../worker/process_job.js";
 
 /**
+ * Build one channel-neutral interactive draft from validated local components.
+ *
+ * @param input - Transient recipient, customer-safe body, and exact buttons.
+ * @returns A draft ready for process_job metadata and sender handoff.
+ */
+export function build_interactive_draft(input: {
+  to: string;
+  text: string;
+  buttons: readonly OutboundDraftButton[];
+}): OutboundDraft {
+  return {
+    to: input.to,
+    message_type: "text",
+    text: input.text,
+    buttons: input.buttons.map((button) => ({ ...button })),
+  };
+}
+
+/**
  * Render one graph result into customer-safe outbound drafts.
  *
  * The builder never infers confirmation from a completed graph. A confirmation

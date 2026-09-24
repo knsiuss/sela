@@ -48,13 +48,16 @@ export interface SlotServiceAdapterOptions {
 export class SlotServiceAdapter implements CalendarPort {
   private readonly tenant_id: string;
   private readonly service: SlotService;
+  private readonly clock: () => number;
   private readonly slots_by_id: Map<string, MappedSlot>;
   private readonly hold_slot_by_id = new Map<string, string>();
+  private readonly hold_by_idempotency_key = new Map<string, SlotHold>();
   private readonly appointment_id_by_booking_id = new Map<string, string>();
 
   constructor(options: SlotServiceAdapterOptions) {
     this.tenant_id = require_non_empty(options.tenant_id, "tenant_id");
-    this.service = options.service ?? new SlotService({ clock: options.clock });
+    this.clock = options.clock ?? Date.now;
+    this.service = options.service ?? new SlotService({ clock: this.clock });
     this.slots_by_id = map_slots(options.slots, options.default_provider_id ?? DEFAULT_PROVIDER_ID);
   }
 
@@ -103,8 +106,8 @@ export class SlotServiceAdapter implements CalendarPort {
    * Args:
    *   slot_id: App slot identifier.
    *   ttl_seconds: Requested lifetime; capped at the package maximum.
-   *   _idempotency_key: Optional external retry key; the in-memory service uses
-   *     its own hold identity and does not persist caller keys.
+   *   idempotency_key: Optional stable retry key. The process-local adapter
+   *     returns its original live hold for the same key and slot.
    *
    * Returns:
    *   The app hold shape with the package-computed ISO expiry.
@@ -115,9 +118,11 @@ export class SlotServiceAdapter implements CalendarPort {
   async hold_slot(
     slot_id: string,
     ttl_seconds: number = HOLD_TTL_SECONDS,
-    _idempotency_key?: string,
+    idempotency_key?: string,
   ): Promise<SlotHold> {
     const mapped_slot = this.require_slot(slot_id);
+    const replay = this.replayed_hold(slot_id, idempotency_key);
+    if (replay !== undefined) return replay;
     const requested_ttl_seconds = clamp_hold_ttl_seconds(ttl_seconds);
     let hold: Hold;
     try {
@@ -134,7 +139,9 @@ export class SlotServiceAdapter implements CalendarPort {
       if (mapped_slot_id === slot_id) this.hold_slot_by_id.delete(mapped_hold_id);
     }
     this.hold_slot_by_id.set(hold.hold_id, slot_id);
-    return this.to_app_hold(slot_id, hold);
+    const app_hold = this.to_app_hold(slot_id, hold);
+    if (idempotency_key !== undefined) this.hold_by_idempotency_key.set(idempotency_key, app_hold);
+    return { ...app_hold };
   }
 
   /**
@@ -162,13 +169,13 @@ export class SlotServiceAdapter implements CalendarPort {
     } catch (error) {
       const slot_id = this.hold_slot_by_id.get(hold_id) ?? hold_id;
       const translated_error = this.translate_error(error, slot_id, hold_id);
-      if (translated_error instanceof HoldExpiredError) this.hold_slot_by_id.delete(hold_id);
+      if (translated_error instanceof HoldExpiredError) this.forget_hold(hold_id);
       throw translated_error;
     }
 
     const slot_id = this.hold_slot_by_id.get(hold_id);
     if (slot_id !== undefined) this.appointment_id_by_booking_id.set(slot_id, appointment.id);
-    this.hold_slot_by_id.delete(hold_id);
+    this.forget_hold(hold_id);
   }
 
   /**
@@ -182,7 +189,7 @@ export class SlotServiceAdapter implements CalendarPort {
    */
   async release_hold(hold_id: string): Promise<void> {
     this.service.release_hold({ hold_id, tenant_id: this.tenant_id });
-    this.hold_slot_by_id.delete(hold_id);
+    this.forget_hold(hold_id);
   }
 
   /**
@@ -198,6 +205,26 @@ export class SlotServiceAdapter implements CalendarPort {
     const appointment_id = this.appointment_id_by_booking_id.get(booking_id) ?? booking_id;
     this.service.cancel_booking({ appointment_id, tenant_id: this.tenant_id });
     this.appointment_id_by_booking_id.delete(booking_id);
+  }
+
+  private replayed_hold(slot_id: string, idempotency_key: string | undefined): SlotHold | undefined {
+    if (idempotency_key === undefined) return undefined;
+    require_idempotency_key(idempotency_key);
+    const cached = this.hold_by_idempotency_key.get(idempotency_key);
+    if (cached === undefined) return undefined;
+    if (cached.slot_id !== slot_id) throw new SlotUnavailableError(slot_id);
+    if (Date.parse(cached.expires_at_iso) <= this.clock()) {
+      this.forget_hold(cached.hold_id);
+      return undefined;
+    }
+    return { ...cached };
+  }
+
+  private forget_hold(hold_id: string): void {
+    this.hold_slot_by_id.delete(hold_id);
+    for (const [key, hold] of this.hold_by_idempotency_key) {
+      if (hold.hold_id === hold_id) this.hold_by_idempotency_key.delete(key);
+    }
   }
 
   private to_package_window(mapped_slot: MappedSlot): {
@@ -252,6 +279,13 @@ function map_slots(slots: readonly TimeSlot[], default_provider_id: string): Map
 
 function require_non_empty(value: string, field_name: string): string {
   if (value.trim() === "") throw new TypeError(`${field_name} must not be empty`);
+  return value;
+}
+
+function require_idempotency_key(value: string): string {
+  if (value.trim() === "" || value.length > 256) {
+    throw new TypeError("idempotency_key must contain between 1 and 256 characters");
+  }
   return value;
 }
 

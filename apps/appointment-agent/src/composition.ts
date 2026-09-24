@@ -20,6 +20,12 @@ import { PostgresWebhookJobQueue } from "./queue/postgres_outbox_queue.js";
 import { PgSqlClient, load_pg_config } from "./persistence/pg_client.js";
 import type { SqlClient } from "./persistence/sql_client.js";
 import { SlotServiceAdapter } from "./tools/slot_service_adapter.js";
+import {
+  InMemoryRescheduleSessionStore,
+  type RescheduleSessionStore,
+} from "./reschedule/session_store.js";
+import { PostgresRescheduleSessionStore } from "./reschedule/postgres_session_store.js";
+import { RescheduleTurnProcessor } from "./reschedule/turn_processor.js";
 import type { CalendarPort } from "./tools/calendar.js";
 import type { TimeSlot } from "./state.js";
 import { build_graph } from "./graph.js";
@@ -73,6 +79,7 @@ export interface AppComposition {
   job_queue: WebhookJobQueue;
   job_claimer: JobClaimer;
   lifecycle: JobLifecycleStore;
+  reschedule_session_store: RescheduleSessionStore;
   graph_factory: GraphFactory;
   sender: OutboundSenderPort;
   server?: NodeHttpServer;
@@ -123,6 +130,9 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
   const inbound_store: InboundMessageStore = sql_client === undefined
     ? new InMemoryInboundMessageStore()
     : new PostgresInboundMessageStore(sql_client, { retention_days });
+  const reschedule_session_store: RescheduleSessionStore = sql_client === undefined
+    ? new InMemoryRescheduleSessionStore()
+    : new PostgresRescheduleSessionStore(sql_client);
   const in_memory_queue = sql_client === undefined ? new InMemoryWebhookQueue() : undefined;
   const job_queue: WebhookJobQueue = in_memory_queue ?? new PostgresWebhookJobQueue(sql_client!);
   const tenant_resolver = sql_client === undefined
@@ -135,8 +145,14 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
     ? new InMemoryJobLifecycleStore()
     : new PostgresJobLifecycleStore(sql_client);
 
-  const calendar_factory = options.calendar_factory ?? ((tenant_id: string): CalendarPort =>
-    new SlotServiceAdapter({ tenant_id, slots: options.slots ?? [] }));
+  const default_calendars = new Map<string, CalendarPort>();
+  const calendar_factory = options.calendar_factory ?? ((tenant_id: string): CalendarPort => {
+    const cached = default_calendars.get(tenant_id);
+    if (cached !== undefined) return cached;
+    const calendar = new SlotServiceAdapter({ tenant_id, slots: options.slots ?? [] });
+    default_calendars.set(tenant_id, calendar);
+    return calendar;
+  });
   const loader: InboundLoader = new StoreInboundLoader(inbound_store);
   const graph_factory: GraphFactory = options.graph_factory ?? ((calendar: CalendarPort): GraphRunner => {
     const graph = build_graph(calendar);
@@ -156,12 +172,17 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
   const process_job_fn = (job: Parameters<typeof process_job>[0]["job"]): Promise<OutboundDraft[]> => {
     const tenant_id = job.tenant_id ?? "unknown";
     const calendar = calendar_factory(tenant_id);
+    const turn_processor = new RescheduleTurnProcessor({
+      session_store: reschedule_session_store,
+      calendar,
+      graph_runner: graph_factory(calendar),
+    });
     return process_job({
       job,
       inbound_loader: loader,
       recipient_cipher,
       calendar,
-      graph_runner: graph_factory(calendar),
+      turn_processor,
       lifecycle,
       deliver,
       max_attempts,
@@ -177,6 +198,7 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
     job_queue,
     job_claimer,
     lifecycle,
+    reschedule_session_store,
     graph_factory,
     sender,
     start_server: async () => {
