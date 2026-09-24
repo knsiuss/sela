@@ -41,6 +41,7 @@ DECLARE
     tenant_attribute SMALLINT;
     wamid_attribute SMALLINT;
     unmapped_claim_count BIGINT;
+    orphan_claim_count BIGINT;
 BEGIN
     LOCK TABLE public.processed_messages IN SHARE ROW EXCLUSIVE MODE;
     LOCK TABLE public.webhook_jobs IN SHARE ROW EXCLUSIVE MODE;
@@ -66,6 +67,24 @@ BEGIN
             USING
                 ERRCODE = 'P0001',
                 HINT = 'Reconcile every legacy claim to a valid tenants.id in a pre-migration transaction, verify no NULL tenant_id remains, then rerun 0011.';
+    END IF;
+
+    SELECT count(*)
+    INTO orphan_claim_count
+    FROM public.processed_messages AS claim
+    LEFT JOIN public.inbound_messages AS inbound
+      ON inbound.tenant_id = claim.tenant_id AND inbound.wamid = claim.wamid
+    LEFT JOIN public.webhook_jobs AS job
+      ON job.tenant_id = claim.tenant_id AND job.wamid = claim.wamid
+    WHERE inbound.id IS NULL OR job.id IS NULL;
+
+    IF orphan_claim_count > 0 THEN
+        RAISE EXCEPTION
+            'processed_messages contains % claim(s) without both an inbound row and a worker job; operator reconciliation is required before migration 0011. Claims were not deleted.',
+            orphan_claim_count
+            USING
+                ERRCODE = 'P0001',
+                HINT = 'Reconcile or explicitly quarantine each incomplete claim, then rerun 0011; never delete a claim automatically.';
     END IF;
 
     -- Make the new tenant dimension mandatory. This is safe only after the

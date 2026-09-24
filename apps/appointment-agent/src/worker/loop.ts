@@ -37,6 +37,8 @@ export interface WorkerLoopCounters {
 /** Injectable loop dependencies and bounded polling policy. */
 export interface WorkerLoopOptions {
   claimer: JobClaimer;
+  /** Optional tenant admission scope; single-tenant workers must set this. */
+  tenant_id?: string;
   process: (job: ClaimedWebhookJob) => Promise<OutboundDraft[]>;
   poll_interval_ms: number;
   batch_size: number;
@@ -66,7 +68,7 @@ export async function run_worker_loop(options: WorkerLoopOptions): Promise<Worke
     while (claimed_in_batch < batch_size && !options.signal.aborted) {
       let job: ClaimedWebhookJob | null;
       try {
-        job = await options.claimer.claim_next_job();
+        job = await options.claimer.claim_next_job(options.tenant_id);
       } catch (error) {
         counters.failed += 1;
         report_error(options, error);

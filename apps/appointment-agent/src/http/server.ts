@@ -140,6 +140,7 @@ async function webhook_response(
   request: IncomingMessage,
   config: HttpServerConfig,
   dependencies: HttpServerDependencies,
+  signal?: AbortSignal,
 ): Promise<HttpResponse> {
   assert_content_length_allowed(request, MAX_WEBHOOK_BYTES);
   const raw_body = await read_raw_body(request, MAX_WEBHOOK_BYTES);
@@ -158,6 +159,7 @@ async function webhook_response(
     {
       tenant_resolver: dependencies.tenant_resolver,
       atomic_ingress: dependencies.atomic_ingress,
+      signal,
       inbound_store: dependencies.inbound_store,
       recipient_cipher: dependencies.recipient_cipher,
       retention_days: dependencies.inbound_retention_days,
@@ -166,10 +168,17 @@ async function webhook_response(
   return json_response(HTTP_STATUS.OK, result);
 }
 
-function with_deadline<T>(operation: Promise<T>, timeout_ms: number): Promise<T> {
+function with_deadline<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  timeout_ms: number,
+): Promise<T> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new RequestDeadlineError()), timeout_ms);
-    operation.then(
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort();
+      reject(new RequestDeadlineError());
+    }, timeout_ms);
+    void operation(controller.signal).then(
       (value) => {
         clearTimeout(timer);
         resolve(value);
@@ -197,7 +206,7 @@ async function create_response(
   if (method === "GET") return verification_response(request, config);
   if (method === "POST") {
     return with_deadline(
-      webhook_response(request, config, dependencies),
+      (signal) => webhook_response(request, config, dependencies, signal),
       WEBHOOK_RESPONSE_DEADLINE_MS,
     );
   }

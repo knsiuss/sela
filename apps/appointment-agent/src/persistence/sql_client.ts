@@ -20,10 +20,11 @@ export interface SqlClient {
    * Run work on one dedicated transaction connection.
    *
    * Implementations must commit on success and roll back on failure. The
-   * method is optional so small query-only test doubles remain compatible with
-   * the existing read/write adapters.
+   * optional signal cancels the transaction and releases/destroys its dedicated
+   * connection. The method is optional so small query-only test doubles remain
+   * compatible with the existing read/write adapters.
    */
-  with_transaction?<T>(work: SqlTransactionWork<T>): Promise<T>;
+  with_transaction?<T>(work: SqlTransactionWork<T>, signal?: AbortSignal): Promise<T>;
   /** Release pooled resources when the composition owns the client. */
   close?(): Promise<void>;
 }

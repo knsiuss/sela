@@ -22,6 +22,7 @@ describe("composition", () => {
     });
 
     expect(composition.reschedule_session_store).toBeInstanceOf(InMemoryRescheduleSessionStore);
+    expect(composition.worker_tenant_id).toBe("42");
     await expect(composition.tenant_resolver.resolve("phone-local")).resolves.toBe("42");
     await expect(composition.tenant_resolver.resolve("phone-other")).resolves.toBeNull();
     const ciphertext = composition.recipient_cipher.encrypt("+12025550123");
@@ -77,6 +78,7 @@ describe("composition", () => {
       },
     });
     expect(composition.reschedule_session_store).toBeInstanceOf(PostgresRescheduleSessionStore);
+    expect(composition.worker_tenant_id).toBe("42");
     await composition.stop();
   });
 
@@ -91,6 +93,7 @@ describe("composition", () => {
     });
 
     expect(composition.sender_registry).toBe(sender_registry);
+    expect(composition.worker_tenant_id).toBeUndefined();
     await composition.stop();
   });
 

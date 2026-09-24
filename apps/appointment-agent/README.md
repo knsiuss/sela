@@ -117,6 +117,15 @@ fails rather than silently using process memory. `APP_MODE=server` starts the HT
 and worker, while `APP_MODE=worker` starts only the worker. `SIGTERM` and
 `SIGINT` stop the worker, close the server, and close the pg pool.
 
+The default database composition also scopes the worker claimer to `TENANT_ID`;
+it cannot claim another tenant's jobs. A composition using an injected
+multi-tenant `OutboundSenderRegistry` may omit `TENANT_ID` and use the global
+claimer, but that registry is an explicit deployment contract and must cover
+every tenant that can enqueue work. An existing dedupe claim without both its
+inbound row and worker job fails closed as an orphan for operator reconciliation.
+The HTTP ACK deadline aborts an in-flight atomic transaction and destroys its
+dedicated connection.
+
 Every Meta `phone_number_id` must have a row in `tenant_channels`:
 
 ```sql

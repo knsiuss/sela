@@ -97,7 +97,7 @@ describe("postgres_message_dedupe", () => {
     }
   });
 
-  it("supports a row-count-only SQL client and maps a unique conflict to duplicate", async () => {
+  it("supports a row-count-only SQL client and rejects unexpected unique violations", async () => {
     const query = vi
       .fn()
       .mockResolvedValueOnce({ rowCount: 1 })
@@ -106,9 +106,12 @@ describe("postgres_message_dedupe", () => {
     expect(await store.try_claim(TENANT_ID, "wamid.row-count")).toBe(true);
     expect(await store.try_claim(TENANT_ID, "wamid.row-count")).toBe(false);
 
-    const conflict_query = vi.fn().mockRejectedValue({ code: "23505" });
+    const conflict_query = vi.fn().mockRejectedValue({ code: "23505", constraint: "processed_messages_wamid_key" });
     const conflict_store = new PostgresMessageDedupe({ query: conflict_query } satisfies SqlClient);
-    expect(await conflict_store.try_claim(TENANT_ID, "wamid.conflict")).toBe(false);
+    await expect(conflict_store.try_claim(TENANT_ID, "wamid.conflict")).rejects.toMatchObject({
+      name: "DedupeStoreError",
+      message: "postgres-dedupe-query-failed",
+    });
   });
 
   it("fails closed when a release result has no verifiable metadata", async () => {

@@ -22,7 +22,6 @@ describe("composition tenant sender routing", () => {
     const composition = build_composition({
       env: {
         USE_IN_MEMORY: "true",
-        TENANT_ID: "tenant-a",
         WHATSAPP_PHONE_NUMBER_ID: PHONE_NUMBER_ID,
         WORKER_POLL_INTERVAL_MS: "5",
         WORKER_BATCH_SIZE: "2",

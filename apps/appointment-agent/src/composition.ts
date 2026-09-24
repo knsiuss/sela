@@ -97,6 +97,8 @@ export interface AppComposition {
   graph_factory: GraphFactory;
   /** Tenant-aware sender boundary used by the worker. */
   sender_registry: OutboundSenderRegistry;
+  /** Tenant admission scope; undefined only for an explicit multi-tenant registry. */
+  worker_tenant_id?: string;
   server?: NodeHttpServer;
   start_server(): Promise<void>;
   start_worker(): void;
@@ -183,6 +185,7 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
   let worker_controller: AbortController | undefined;
   let worker_promise: Promise<WorkerLoopCounters> | undefined;
   const sender_registry = resolve_outbound_sender(options, env, has_database_url);
+  const worker_tenant_id = resolve_worker_tenant_scope(options, env, has_database_url);
   const deliver = async (tenant_id: string, drafts: readonly OutboundDraft[]): Promise<void> => {
     for (const draft of drafts) await sender_registry.send(tenant_id, draft);
   };
@@ -220,6 +223,7 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
     reschedule_session_store,
     graph_factory,
     sender_registry,
+    worker_tenant_id,
     start_server: async () => {
       if (server !== undefined) return;
       const config = load_server_config(env);
@@ -238,13 +242,16 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
       worker_controller = new AbortController();
       worker_promise = run_worker_loop({
         claimer: job_claimer,
+        tenant_id: worker_tenant_id,
         process: process_job_fn,
         poll_interval_ms,
         batch_size,
         signal: worker_controller.signal,
-        on_error: (error) => {
+        on_error: (error, job) => {
           console.error(JSON.stringify({
             event: "worker_loop_error",
+            job_id: job?.id,
+            tenant_id: job?.tenant_id,
             error_name: error instanceof Error ? error.name : "UnknownError",
             ...(error instanceof JobProcessingError ? { error_code: error.code } : {}),
           }));
@@ -326,6 +333,25 @@ function is_outbound_sender_registry(value: unknown): value is OutboundSenderReg
 
 function is_outbound_sender_port(value: unknown): value is OutboundSenderPort {
   return typeof value === "object" && value !== null && typeof (value as { send?: unknown }).send === "function";
+}
+
+/**
+ * Resolve the worker's queue admission scope.
+ *
+ * An injected multi-tenant registry is an explicit deployment contract and may
+ * use the global claimer. Without that contract, the worker is bound to the
+ * same single tenant as the environment-built sender.
+ */
+function resolve_worker_tenant_scope(
+  options: CompositionOptions,
+  env: Record<string, string | undefined>,
+  is_database_backed: boolean,
+): string | undefined {
+  const configured_tenant_id = env["TENANT_ID"]?.trim();
+  if (options.sender_registry === undefined || (configured_tenant_id !== undefined && configured_tenant_id !== "")) {
+    return resolve_runtime_tenant_id(env, is_database_backed);
+  }
+  return undefined;
 }
 
 function make_in_memory_resolver(env: Record<string, string | undefined>): InMemoryTenantResolver {

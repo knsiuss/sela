@@ -74,6 +74,8 @@ export interface InboundRequestOptions {
   recipient_cipher?: RecipientCipher;
   /** Atomically claims, retains, and enqueues Postgres-backed messages. */
   atomic_ingress?: AtomicIngressStore;
+  /** Cancels an in-flight atomic database transaction at the HTTP deadline. */
+  signal?: AbortSignal;
   /** Overrides the default retention used when creating a record. */
   retention_days?: number;
 }
@@ -357,7 +359,7 @@ export async function handle_inbound_request(
             retention_days: options.retention_days,
             now: received_at_iso,
           }),
-        });
+        }, options.signal);
       } catch (error) {
         throw new WebhookQueueError(error);
       }

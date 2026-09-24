@@ -245,6 +245,41 @@ describe("PgSqlClient", () => {
     expect(release).toHaveBeenCalledWith(true);
   });
 
+  it("aborts an in-flight transaction and destroys its connection", async () => {
+    const commands: string[] = [];
+    const release = vi.fn();
+    const controller = new AbortController();
+    let callback_started!: () => void;
+    const started = new Promise<void>((resolve) => {
+      callback_started = resolve;
+    });
+    const pool: PgPoolLike = {
+      query: vi.fn(async () => ({ rows: [], rowCount: 0 })),
+      connect: vi.fn(async () => ({
+        query: vi.fn(async (sql: string) => {
+          commands.push(sql);
+          return { rows: [], rowCount: 0 };
+        }),
+        release,
+      })),
+      end: vi.fn(async () => undefined),
+    };
+    const client = new PgSqlClient({ pool, transaction_timeout_ms: 1_000 });
+    const transaction = client.with_transaction(() => {
+      callback_started();
+      return new Promise<never>(() => undefined);
+    }, controller.signal);
+    await started;
+    controller.abort();
+
+    await expect(transaction).rejects.toMatchObject({
+      name: "PgClientError",
+      message: "postgres-transaction-aborted",
+    });
+    expect(commands).toEqual(["BEGIN"]);
+    expect(release).toHaveBeenCalledWith(true);
+  });
+
   it("fails closed when the pool cannot provide a transaction connection", async () => {
     const client = new PgSqlClient({
       pool: {

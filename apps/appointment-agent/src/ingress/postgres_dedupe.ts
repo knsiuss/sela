@@ -41,16 +41,6 @@ async function query_count(
   throw new Error("invalid-sql-result");
 }
 
-/** Treat a driver-reported unique conflict as a duplicate claim. */
-function is_unique_violation(error: unknown): boolean {
-  let current: unknown = error;
-  for (let depth = 0; depth < 3 && current !== undefined && current !== null; depth += 1) {
-    if (typeof current === "object" && (current as { code?: unknown }).code === "23505") return true;
-    current = current instanceof Error ? (current as Error & { cause?: unknown }).cause : undefined;
-  }
-  return false;
-}
-
 /** Postgres claim store backed by the tenant-scoped processed-message key from migration 0011. */
 export class PostgresMessageDedupe implements MessageDedupeStore {
   private readonly sql_client: SqlClient | undefined;
@@ -91,13 +81,11 @@ export class PostgresMessageDedupe implements MessageDedupeStore {
    */
   async try_claim(tenant_id: string, wamid: string): Promise<boolean> {
     assert_dedupe_identity(tenant_id, wamid);
-    try {
-      const row_count = await this.execute(INSERT_CLAIM_SQL, [tenant_id, wamid]);
-      return row_count > 0;
-    } catch (error) {
-      if (is_unique_violation(error)) return false;
-      throw error;
-    }
+    // Intended duplicates are handled by ON CONFLICT and return rowCount 0.
+    // Any driver-reported unique violation therefore indicates schema drift or
+    // another constraint and must not be silently treated as a duplicate.
+    const row_count = await this.execute(INSERT_CLAIM_SQL, [tenant_id, wamid]);
+    return row_count > 0;
   }
 
   /**

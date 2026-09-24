@@ -38,6 +38,15 @@ describe("outbound sender registry", () => {
     expect(tenant_b.send).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects reusing one sender object across tenant bindings", () => {
+    const sender = make_sender().sender;
+
+    expect(() => new MappedOutboundSenderRegistry(new Map([
+      ["tenant-a", sender],
+      ["tenant-b", sender],
+    ]))).toThrow("sender-reuse");
+  });
+
   it("fails closed without provider I/O for an unmapped tenant", async () => {
     const tenant_a = make_sender();
     const registry = new MappedOutboundSenderRegistry(new Map([["tenant-a", tenant_a.sender]]));

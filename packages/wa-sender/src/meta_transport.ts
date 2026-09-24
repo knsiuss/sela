@@ -27,7 +27,9 @@ export interface MetaGraphTransportOptions {
   /** Graph API base URL, for example https://graph.facebook.com/v23.0. */
   graph_api_url?: string;
   /** Explicit test-only origins; production defaults to graph.facebook.com. */
-  allowed_hosts?: readonly string[];
+  test_only_allowed_hosts?: readonly string[];
+  /** Required before any non-default test origin can be enabled. */
+  test_mode?: boolean;
   /** Compatibility alias for callers that name the value a base URL. */
   graph_api_base_url?: string;
   /** Numeric Meta phone-number identifier. */
@@ -117,7 +119,8 @@ export class MetaGraphTransport implements WhatsAppTransport {
     this.endpoint = build_endpoint(
       base_url,
       options.phone_number_id,
-      options.allowed_hosts ?? DEFAULT_ALLOWED_HOSTS,
+      options.test_only_allowed_hosts ?? DEFAULT_ALLOWED_HOSTS,
+      options.test_mode === true,
     );
     this.access_token = require_secret(options.access_token);
     this.fetch_implementation = options.fetch ?? globalThis.fetch;
@@ -230,6 +233,7 @@ function build_endpoint(
   base_url: string | undefined,
   phone_number_id: string,
   allowed_hosts: readonly string[],
+  test_mode: boolean,
 ): URL {
   if (
     typeof base_url !== "string" ||
@@ -248,8 +252,19 @@ function build_endpoint(
     throw create_configuration_error("Meta Graph API URL must be safe HTTPS without credentials or query data");
   }
   const normalized_hosts = allowed_hosts.map((host) => host.trim().toLowerCase()).filter((host) => host !== "");
-  if (normalized_hosts.length === 0 || !normalized_hosts.includes(url.hostname.toLowerCase())) {
+  if (
+    normalized_hosts.length === 0 ||
+    normalized_hosts.some((host) => host.includes(":") || host.includes("/")) ||
+    !normalized_hosts.includes(url.hostname.toLowerCase())
+  ) {
     throw create_configuration_error("Meta Graph API host is not allowlisted");
+  }
+  if (url.port !== "" && url.port !== "443") {
+    throw create_configuration_error("Meta Graph API URL must use the default HTTPS port");
+  }
+  const uses_default_host = url.hostname.toLowerCase() === "graph.facebook.com";
+  if (!uses_default_host && test_mode !== true) {
+    throw create_configuration_error("custom Meta Graph origins require explicit test mode");
   }
   const phone_id = require_phone_number_id(phone_number_id);
   const base_path = url.pathname.replace(/\/+$/u, "");

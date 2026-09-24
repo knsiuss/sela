@@ -85,9 +85,12 @@ function successful_handler(sql: string, values?: readonly unknown[]): SqlQueryR
   throw new Error("unexpected SQL");
 }
 
-function duplicate_handler(sql: string, _values?: readonly unknown[]): SqlQueryResult {
+function duplicate_handler(sql: string, values?: readonly unknown[]): SqlQueryResult {
   if (sql.includes("INSERT INTO processed_messages")) {
     return { rows: [], rowCount: 0 };
+  }
+  if (sql.includes("FROM processed_messages AS pm")) {
+    return { rows: [{ tenant_id: values?.[0], wamid: values?.[1] }], rowCount: 1 };
   }
   throw new Error("duplicate must not write payload tables");
 }
@@ -131,6 +134,47 @@ describe("postgres atomic ingress store", () => {
     ]);
   });
 
+  it("snapshots mutable input before an asynchronous transaction starts", async () => {
+    let release_transaction!: () => void;
+    let mark_started!: () => void;
+    const transaction_started = new Promise<void>((resolve) => {
+      mark_started = resolve;
+    });
+    const transaction_gate = new Promise<void>((resolve) => {
+      release_transaction = resolve;
+    });
+    const query = vi.fn(async (sql: string, values?: readonly unknown[]) => successful_handler(sql, values));
+    const client: SqlClient = {
+      query,
+      with_transaction: async <T>(work: SqlTransactionWork<T>): Promise<T> => {
+        mark_started();
+        await transaction_gate;
+        return work({ query });
+      },
+    };
+    const store = new PostgresAtomicIngressStore(client);
+    const mutable_input = input({}, { ...BASE_RECORD });
+    const result = store.accept(mutable_input);
+    await transaction_started;
+    mutable_input.inbound_record.tenant_id = "99";
+    mutable_input.inbound_record.wamid = "wamid.mutated";
+    release_transaction();
+
+    await expect(result).resolves.toMatchObject({
+      status: "accepted",
+      tenant_id: BASE_RECORD.tenant_id,
+      wamid: BASE_RECORD.wamid,
+    });
+    expect(query.mock.calls[0]?.[1]).toEqual([BASE_RECORD.tenant_id, BASE_RECORD.wamid]);
+    expect(query.mock.calls[2]?.[1]).toEqual([
+      BASE_RECORD.tenant_id,
+      "request-atomic-test",
+      BASE_RECORD.wamid,
+      BASE_RECORD.conversation_id,
+      "2026-09-24T08:00:01.000Z",
+    ]);
+  });
+
   it("returns a duplicate without writing either payload table", async () => {
     const harness = make_harness(duplicate_handler);
     const store = new PostgresAtomicIngressStore(harness.client);
@@ -141,8 +185,25 @@ describe("postgres atomic ingress store", () => {
       wamid: BASE_RECORD.wamid,
     });
     expect(harness.transaction_commands).toEqual(["BEGIN", "COMMIT"]);
-    expect(harness.calls).toHaveLength(1);
+    expect(harness.calls).toHaveLength(2);
     expect(harness.calls[0]?.sql).toContain("ON CONFLICT (tenant_id, wamid) DO NOTHING");
+    expect(harness.calls[1]?.sql).toContain("FROM processed_messages AS pm");
+  });
+
+  it("fails closed when an existing dedupe claim has no inbound row or job", async () => {
+    const harness = make_harness((sql, values) => {
+      if (sql.includes("INSERT INTO processed_messages")) return { rows: [], rowCount: 0 };
+      if (sql.includes("FROM processed_messages AS pm")) return { rows: [], rowCount: 0 };
+      throw new Error("orphan claim must not write payload tables");
+    });
+    const store = new PostgresAtomicIngressStore(harness.client);
+
+    await expect(store.accept(input())).rejects.toMatchObject({
+      name: "AtomicIngressStoreError",
+      message: "atomic-ingress-orphan-claim",
+    });
+    expect(harness.transaction_commands).toEqual(["BEGIN", "ROLLBACK"]);
+    expect(harness.calls).toHaveLength(2);
   });
 
   it("rolls back when the claim write fails", async () => {
@@ -203,6 +264,9 @@ describe("postgres atomic ingress store", () => {
         const key = `${String(values?.[0])}\u0000${String(values?.[1])}`;
         if (claimed.has(key)) return { rows: [], rowCount: 0 };
         claimed.add(key);
+        return { rows: [{ tenant_id: values?.[0], wamid: values?.[1] }], rowCount: 1 };
+      }
+      if (sql.includes("FROM processed_messages AS pm")) {
         return { rows: [{ tenant_id: values?.[0], wamid: values?.[1] }], rowCount: 1 };
       }
       return successful_handler(sql, values);

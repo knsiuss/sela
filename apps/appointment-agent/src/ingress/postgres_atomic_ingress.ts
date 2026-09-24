@@ -50,7 +50,7 @@ export type AtomicIngressResult = AcceptedAtomicIngress | DuplicateAtomicIngress
 /** Narrow port consumed by the webhook boundary. */
 export interface AtomicIngressStore {
   /** Atomically accept one message or report its tenant-scoped duplicate. */
-  accept(input: AtomicIngressInput): Promise<AtomicIngressResult>;
+  accept(input: AtomicIngressInput, signal?: AbortSignal): Promise<AtomicIngressResult>;
 }
 
 // A WAMID is idempotent only within its tenant; the composite key prevents cross-tenant suppression.
@@ -59,6 +59,17 @@ const CLAIM_MESSAGE_SQL = `
   VALUES ($1, $2)
   ON CONFLICT (tenant_id, wamid) DO NOTHING
   RETURNING tenant_id, wamid
+`;
+
+const VERIFY_COMPLETE_CLAIM_SQL = `
+  SELECT pm.tenant_id, pm.wamid
+  FROM processed_messages AS pm
+  INNER JOIN inbound_messages AS im
+    ON im.tenant_id = pm.tenant_id AND im.wamid = pm.wamid
+  INNER JOIN webhook_jobs AS wj
+    ON wj.tenant_id = pm.tenant_id AND wj.wamid = pm.wamid
+  WHERE pm.tenant_id = $1 AND pm.wamid = $2
+  LIMIT 1
 `;
 
 const INSERT_INBOUND_SQL = `
@@ -100,7 +111,7 @@ export class PostgresAtomicIngressStore implements AtomicIngressStore {
    * @returns An accepted or tenant-scoped duplicate result after commit.
    * @throws AtomicIngressStoreError when the transaction is unavailable or fails.
    */
-  async accept(input: AtomicIngressInput): Promise<AtomicIngressResult> {
+  async accept(input: AtomicIngressInput, signal?: AbortSignal): Promise<AtomicIngressResult> {
     const normalized = validate_input(input);
     const with_transaction = this.sql_client.with_transaction;
     if (typeof with_transaction !== "function") {
@@ -110,10 +121,17 @@ export class PostgresAtomicIngressStore implements AtomicIngressStore {
     try {
       const run_transaction = with_transaction.bind(this.sql_client) as <T>(
         work: SqlTransactionWork<T>,
+        signal?: AbortSignal,
       ) => Promise<T>;
       return await run_transaction<AtomicIngressResult>(async (transaction) => {
         const claimed = await claim_message(transaction, normalized.tenant_id, normalized.inbound_record.wamid);
         if (!claimed) {
+          const complete = await verify_complete_claim(
+            transaction,
+            normalized.tenant_id,
+            normalized.inbound_record.wamid,
+          );
+          if (!complete) throw new AtomicIngressStoreError("atomic-ingress-orphan-claim");
           return {
             status: "duplicate",
             tenant_id: normalized.tenant_id,
@@ -128,7 +146,7 @@ export class PostgresAtomicIngressStore implements AtomicIngressStore {
           tenant_id: normalized.tenant_id,
           wamid: normalized.inbound_record.wamid,
         } satisfies AcceptedAtomicIngress;
-      });
+      }, signal);
     } catch (error) {
       if (error instanceof AtomicIngressStoreError) throw error;
       throw new AtomicIngressStoreError("atomic-ingress-persistence-failed", error);
@@ -152,6 +170,28 @@ async function claim_message(
     const returned_wamid = row["wamid"];
     if (returned_tenant_id !== tenant_id || returned_wamid !== wamid) {
       throw new AtomicIngressStoreError("atomic-ingress-claim-row-invalid");
+    }
+  }
+  return true;
+}
+
+async function verify_complete_claim(
+  transaction: SqlTransactionClient,
+  tenant_id: string,
+  wamid: string,
+): Promise<boolean> {
+  const result = await transaction.query(VERIFY_COMPLETE_CLAIM_SQL, [tenant_id, wamid]);
+  const shape = result_shape(result, "atomic-ingress-completeness-result-invalid");
+  if (shape.count > 1) throw new AtomicIngressStoreError("atomic-ingress-completeness-result-invalid");
+  if (shape.count === 0) return false;
+  if (shape.rows !== undefined) {
+    const row = shape.rows[0];
+    if (
+      !is_record(row) ||
+      identifier_value(row["tenant_id"]) !== tenant_id ||
+      row["wamid"] !== wamid
+    ) {
+      throw new AtomicIngressStoreError("atomic-ingress-completeness-row-invalid");
     }
   }
   return true;
@@ -254,7 +294,9 @@ function validate_input(input: AtomicIngressInput): AtomicIngressInput {
     tenant_id,
     request_id,
     received_at_iso: input.received_at_iso,
-    inbound_record: record,
+    // Capture an immutable snapshot before the transaction can await checkout;
+    // callers must not change tenant scope between validation and SQL.
+    inbound_record: Object.freeze({ ...record }),
   };
 }
 

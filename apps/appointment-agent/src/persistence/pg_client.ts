@@ -174,22 +174,23 @@ export class PgSqlClient implements TransactionalSqlClient {
    * @returns The callback result after a successful commit.
    * @throws PgClientError when checkout, the transaction, or release fails.
    */
-  async with_transaction<T>(work: SqlTransactionWork<T>): Promise<T> {
+  async with_transaction<T>(work: SqlTransactionWork<T>, signal?: AbortSignal): Promise<T> {
     if (this.is_closed) throw new PgClientError("postgres-client-closed");
     if (typeof work !== "function") throw new PgClientError("postgres-transaction-callback-invalid");
+    if (signal?.aborted) throw new PgClientError("postgres-transaction-aborted");
     const connect = this.pool.connect;
     if (connect === undefined) throw new PgClientError("postgres-transaction-unavailable");
 
     let connection: PgPoolClientLike;
     try {
-      connection = await connect.call(this.pool);
+      connection = await connect_with_signal(connect, this.pool, signal);
     } catch (error) {
       throw new PgClientError("postgres-transaction-connect-failed", error);
     }
 
     let attempt: TransactionAttempt<T>;
     try {
-      attempt = await execute_transaction(connection, this.transaction_timeout_ms, work);
+      attempt = await execute_transaction(connection, this.transaction_timeout_ms, work, signal);
     } catch (error) {
       try {
         connection.release(true);
@@ -244,6 +245,48 @@ export class PgSqlClient implements TransactionalSqlClient {
   }
 }
 
+async function connect_with_signal(
+  connect: () => Promise<PgPoolClientLike>,
+  pool: PgPoolLike,
+  signal?: AbortSignal,
+): Promise<PgPoolClientLike> {
+  if (signal === undefined) return connect.call(pool);
+  if (signal.aborted) throw new PgClientError("postgres-transaction-aborted");
+
+  return new Promise<PgPoolClientLike>((resolve, reject) => {
+    let settled = false;
+    const on_abort = (): void => {
+      if (settled) return;
+      settled = true;
+      reject(new PgClientError("postgres-transaction-aborted"));
+    };
+    signal.addEventListener("abort", on_abort, { once: true });
+    void Promise.resolve()
+      .then(() => connect.call(pool))
+      .then(
+        (connection) => {
+          signal.removeEventListener("abort", on_abort);
+          if (settled) {
+            try {
+              connection.release(true);
+            } catch {
+              // The original cancellation remains the actionable failure.
+            }
+            return;
+          }
+          settled = true;
+          resolve(connection);
+        },
+        (error: unknown) => {
+          signal.removeEventListener("abort", on_abort);
+          if (settled) return;
+          settled = true;
+          reject(error);
+        },
+      );
+  });
+}
+
 type TransactionAttempt<T> =
   | { ok: true; value: T; timed_out: boolean }
   | { ok: false; error: unknown; timed_out: boolean };
@@ -252,6 +295,7 @@ async function execute_transaction<T>(
   connection: PgPoolClientLike,
   timeout_ms: number,
   work: SqlTransactionWork<T>,
+  signal?: AbortSignal,
 ): Promise<TransactionAttempt<T>> {
   let began = false;
   let is_active = true;
@@ -260,6 +304,7 @@ async function execute_transaction<T>(
   try {
     const value = await run_bounded(
       async () => {
+        if (signal?.aborted) throw new PgClientError("postgres-transaction-aborted");
         // Mark the attempt before BEGIN so an ambiguous BEGIN failure still attempts cleanup.
         began = true;
         await control_query(connection, "BEGIN", "postgres-transaction-begin-failed");
@@ -273,12 +318,15 @@ async function execute_transaction<T>(
         timed_out = true;
         is_active = false;
       },
+      signal,
     );
     is_active = false;
     return { ok: true, value, timed_out };
   } catch (error) {
     is_active = false;
-    const rollback = await rollback_after_failure(connection, began, error, timeout_ms);
+    const rollback = signal?.aborted
+      ? { error, should_destroy: true }
+      : await rollback_after_failure(connection, began, error, timeout_ms);
     return {
       ok: false,
       error: rollback.error,
@@ -350,18 +398,29 @@ async function run_bounded<T>(
   operation: () => Promise<T>,
   timeout_ms: number,
   on_timeout: () => void,
+  signal?: AbortSignal,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let on_abort: (() => void) | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       on_timeout();
       reject(new PgClientError("postgres-transaction-timeout"));
     }, timeout_ms);
+    if (signal !== undefined) {
+      on_abort = (): void => {
+        on_timeout();
+        reject(new PgClientError("postgres-transaction-aborted"));
+      };
+      if (signal.aborted) on_abort();
+      else signal.addEventListener("abort", on_abort, { once: true });
+    }
   });
   try {
     return await Promise.race([Promise.resolve().then(operation), timeout]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    if (on_abort !== undefined) signal?.removeEventListener("abort", on_abort);
   }
 }
 

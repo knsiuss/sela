@@ -14,7 +14,9 @@ export class OutboundSenderRegistryError extends Error {
   readonly code = "tenant_sender_not_configured";
 
   /** Create a safe registry configuration or lookup error. */
-  constructor(reason: "tenant-not-configured" | "registry-invalid" = "tenant-not-configured") {
+  constructor(
+    reason: "tenant-not-configured" | "registry-invalid" | "sender-reuse" = "tenant-not-configured",
+  ) {
     super(`outbound-sender-registry-invalid: ${reason}`);
     this.name = "OutboundSenderRegistryError";
   }
@@ -63,8 +65,14 @@ export class MappedOutboundSenderRegistry implements OutboundSenderRegistry {
    */
   constructor(senders: ReadonlyMap<string, OutboundSenderPort>) {
     this.senders = new Map<string, OutboundSenderPort>();
+    const bound_senders = new Set<OutboundSenderPort>();
     for (const [tenant_id, sender] of senders) {
-      this.senders.set(require_tenant_id(tenant_id), require_sender(sender));
+      const validated_sender = require_sender(sender);
+      if (bound_senders.has(validated_sender)) {
+        throw new OutboundSenderRegistryError("sender-reuse");
+      }
+      bound_senders.add(validated_sender);
+      this.senders.set(require_tenant_id(tenant_id), validated_sender);
     }
   }
 

@@ -33,6 +33,7 @@ describe("worker loop", () => {
 
     const counters = await run_worker_loop({
       claimer,
+      tenant_id: "42",
       process,
       poll_interval_ms: 1,
       batch_size: 10,
@@ -42,6 +43,7 @@ describe("worker loop", () => {
 
     expect(counters).toEqual({ processed: 1, failed: 1, skipped: 0 });
     expect(process).toHaveBeenCalledTimes(2);
+    expect(claimer.claim_next_job).toHaveBeenCalledWith("42");
     expect(wait).toHaveBeenCalledTimes(1);
   });
 
