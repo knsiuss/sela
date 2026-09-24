@@ -147,6 +147,7 @@ describe("WhatsAppSender", () => {
     );
     const transport = new MetaGraphTransport({
       graph_api_url: "https://graph.example.test/v1.0",
+      allowed_hosts: ["graph.example.test"],
       phone_number_id: "phone-1",
       access_token: TEST_TOKEN,
       fetch: fetch_mock,
@@ -174,6 +175,7 @@ describe("MetaGraphTransport", () => {
     );
     const transport = new MetaGraphTransport({
       graph_api_url: "https://graph.example.test/v1.0/",
+      allowed_hosts: ["graph.example.test"],
       phone_number_id: "phone-2",
       access_token: TEST_TOKEN,
       request_timeout_ms: 250,
@@ -189,6 +191,29 @@ describe("MetaGraphTransport", () => {
     expect(JSON.parse(String(init?.body))).toMatchObject({ messaging_product: "whatsapp", type: "text" });
   });
 
+  it("rejects a non-allowlisted Graph origin before sending a token", () => {
+    expect(() => new MetaGraphTransport({
+      graph_api_url: "https://evil.example/v1.0",
+      phone_number_id: "phone-unsafe",
+      access_token: TEST_TOKEN,
+    })).toThrow("Meta Graph API host is not allowlisted");
+  });
+
+  it("disables redirects on the token-bearing request", async () => {
+    const fetch_mock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ messages: [{ id: "wamid-redirect-safe" }] }), { status: 200 }),
+    );
+    const transport = new MetaGraphTransport({
+      graph_api_url: "https://graph.example.test/v1.0",
+      allowed_hosts: ["graph.example.test"],
+      phone_number_id: "phone-redirect",
+      access_token: TEST_TOKEN,
+      fetch: fetch_mock,
+    });
+    await transport.send({ to: "+12025550100", type: "text", text: { body: "Hello" } });
+    expect(fetch_mock.mock.calls[0]?.[1]?.redirect).toBe("error");
+  });
+
   it("sanitizes upstream errors and never retries", async () => {
     const fetch_mock = vi.fn().mockResolvedValue(
       new Response(
@@ -198,6 +223,7 @@ describe("MetaGraphTransport", () => {
     );
     const transport = new MetaGraphTransport({
       graph_api_url: "https://graph.example.test/v1.0",
+      allowed_hosts: ["graph.example.test"],
       phone_number_id: "phone-3",
       access_token: TEST_TOKEN,
       fetch: fetch_mock,
@@ -224,6 +250,7 @@ describe("MetaGraphTransport", () => {
     );
     const transport = new MetaGraphTransport({
       graph_api_url: "https://graph.example.test/v1.0",
+      allowed_hosts: ["graph.example.test"],
       phone_number_id: "phone-token-code",
       access_token: TEST_TOKEN,
       fetch: fetch_mock,
@@ -242,6 +269,7 @@ describe("MetaGraphTransport", () => {
   it("translates timeout and malformed response failures", async () => {
     const timeout_transport = new MetaGraphTransport({
       graph_api_url: "https://graph.example.test/v1.0",
+      allowed_hosts: ["graph.example.test"],
       phone_number_id: "phone-4",
       access_token: TEST_TOKEN,
       fetch: vi.fn().mockRejectedValue(new DOMException("private timeout", "TimeoutError")),
@@ -252,6 +280,7 @@ describe("MetaGraphTransport", () => {
 
     const invalid_transport = new MetaGraphTransport({
       graph_api_url: "https://graph.example.test/v1.0",
+      allowed_hosts: ["graph.example.test"],
       phone_number_id: "phone-5",
       access_token: TEST_TOKEN,
       fetch: vi.fn().mockResolvedValue(new Response("not-json", { status: 200 })),

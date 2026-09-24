@@ -26,6 +26,8 @@ export interface WhatsAppTransport {
 export interface MetaGraphTransportOptions {
   /** Graph API base URL, for example https://graph.facebook.com/v23.0. */
   graph_api_url?: string;
+  /** Explicit test-only origins; production defaults to graph.facebook.com. */
+  allowed_hosts?: readonly string[];
   /** Compatibility alias for callers that name the value a base URL. */
   graph_api_base_url?: string;
   /** Numeric Meta phone-number identifier. */
@@ -45,6 +47,9 @@ export const DEFAULT_META_REQUEST_TIMEOUT_MS = 10_000;
 
 /** Maximum supported Meta request timeout. */
 export const MAX_META_REQUEST_TIMEOUT_MS = 120_000;
+
+/** Production host allowlist for the bearer-token request. */
+const DEFAULT_ALLOWED_HOSTS = ["graph.facebook.com"] as const;
 
 const MIN_HTTP_STATUS = 100;
 const MAX_HTTP_STATUS = 599;
@@ -109,7 +114,11 @@ export class MetaGraphTransport implements WhatsAppTransport {
    */
   constructor(options: MetaGraphTransportOptions) {
     const base_url = options.graph_api_url ?? options.graph_api_base_url;
-    this.endpoint = build_endpoint(base_url, options.phone_number_id);
+    this.endpoint = build_endpoint(
+      base_url,
+      options.phone_number_id,
+      options.allowed_hosts ?? DEFAULT_ALLOWED_HOSTS,
+    );
     this.access_token = require_secret(options.access_token);
     this.fetch_implementation = options.fetch ?? globalThis.fetch;
     if (typeof this.fetch_implementation !== "function") {
@@ -217,7 +226,11 @@ async function read_safe_upstream_code(response: Response): Promise<string | und
   return undefined;
 }
 
-function build_endpoint(base_url: string | undefined, phone_number_id: string): URL {
+function build_endpoint(
+  base_url: string | undefined,
+  phone_number_id: string,
+  allowed_hosts: readonly string[],
+): URL {
   if (
     typeof base_url !== "string" ||
     base_url.trim() === "" ||
@@ -233,6 +246,10 @@ function build_endpoint(base_url: string | undefined, phone_number_id: string): 
   }
   if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") {
     throw create_configuration_error("Meta Graph API URL must be safe HTTPS without credentials or query data");
+  }
+  const normalized_hosts = allowed_hosts.map((host) => host.trim().toLowerCase()).filter((host) => host !== "");
+  if (normalized_hosts.length === 0 || !normalized_hosts.includes(url.hostname.toLowerCase())) {
+    throw create_configuration_error("Meta Graph API host is not allowlisted");
   }
   const phone_id = require_phone_number_id(phone_number_id);
   const base_path = url.pathname.replace(/\/+$/u, "");

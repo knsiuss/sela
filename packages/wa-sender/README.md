@@ -5,7 +5,7 @@ A dependency-free TypeScript boundary for the WhatsApp Cloud API. The package us
 ## Boundary
 
 - `WhatsAppSender` validates untrusted messages, derives a deterministic idempotency key, applies the 24-hour/template and confirmation policies, and calls the transport at most once for concurrent identical work.
-- `MetaGraphTransport` sends one request to a configured HTTPS Graph API URL. It uses an injected `AbortSignal.timeout` boundary and never retries automatically.
+- `MetaGraphTransport` sends one request to a configured HTTPS Graph API URL. Production defaults to the `graph.facebook.com` host allowlist, rejects redirects, uses an injected `AbortSignal.timeout` boundary, and never retries automatically; test origins require an explicit `allowed_hosts` value.
 - `InMemoryTransport` supports deterministic local smoke tests without network I/O; it is not a production transport.
 - `TemplateRegistry` accepts utility templates only, rejects promotional content, and rejects duplicate or unknown definitions.
 - Interactive reply buttons are limited to deterministic quick replies; template buttons remain registry-controlled.
