@@ -1,11 +1,7 @@
 import type { AppointmentStateType, Intent } from "./state.js";
+import { detect_handoff_reason } from "./handoff.js";
 
 const CONFIDENCE_THRESHOLD = Number(process.env.CONFIDENCE_THRESHOLD ?? 0.7);
-
-// D-05 gates: a human decides when the action is irreversible, carries
-// liability, moves money, identity is unverified, or ambiguity is high.
-const HUMAN_KEYWORDS =
-  /(komplain|keberatan|darurat|emergency|sakit banget|refund|bayar|tagih|discount|diskon|asuransi|insurance|pengacara|lawyer)/i;
 
 export interface ClassifiedIntent {
   intent: Intent;
@@ -42,8 +38,9 @@ export interface HandoffDecision {
 /**
  * Decide whether a conversation must be handed to a human.
  *
- * Sensitive keywords always escalate, even with a clear intent,
- * because liability outranks automation savings.
+ * Deny-list detection is delegated to handoff.ts, the single policy owner,
+ * so keyword additions can never land in only one of two gates. Confidence
+ * and unknown-intent checks stay here because they read graph state.
  *
  * Args:
  *   state: Current appointment state with intent and confidence filled.
@@ -52,8 +49,9 @@ export interface HandoffDecision {
  *   Escalation flag plus a machine-readable reason for the audit log.
  */
 export function needs_human(state: AppointmentStateType): HandoffDecision {
-  if (HUMAN_KEYWORDS.test(state.raw_message)) {
-    return { escalate: true, reason: "sensitive-or-liability-keyword" };
+  const deny_list_reason = detect_handoff_reason(state.raw_message);
+  if (deny_list_reason !== undefined) {
+    return { escalate: true, reason: deny_list_reason };
   }
   if (state.confidence < CONFIDENCE_THRESHOLD) {
     return { escalate: true, reason: `low-confidence:${state.confidence}` };

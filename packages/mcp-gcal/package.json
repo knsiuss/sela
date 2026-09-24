@@ -1,1 +1,7 @@
-{"name": "@repo/mcp-gcal", "version": "0.1.0", "private": true, "type": "module", "main": "./src/index.ts", "types": "./src/index.ts"}
+{
+  "name": "@repo/mcp-gcal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reserved boundary for the Google Calendar MCP server. No exports until the connector is implemented; the previous manifest pointed main/types at a src/ directory that did not exist, so any import failed at resolve time."
+}

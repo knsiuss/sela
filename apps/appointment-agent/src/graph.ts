@@ -1,18 +1,25 @@
 import { StateGraph, START, END, interrupt } from "@langchain/langgraph";
 import { AppointmentState, type AppointmentStateType } from "./state.js";
 import { classify_intent, needs_human } from "./guardrails.js";
+import { detect_handoff_reason, mask_phone_digits } from "./handoff.js";
 import type { CalendarPort } from "./tools/calendar.js";
 import { HOLD_TTL_SECONDS } from "./tools/hold_ttl.js";
 
 function parse_message(state: AppointmentStateType): Partial<AppointmentStateType> {
   const { intent, confidence } = classify_intent(state.raw_message);
   const gate = needs_human({ ...state, intent, confidence });
+  if (!gate.escalate) {
+    return { intent, confidence, needs_human: false, done: false };
+  }
+  // Mask before the summary reaches state: raw customer text may carry a
+  // phone number, and state is persisted in the LangGraph checkpointer.
+  const reason = detect_handoff_reason(state.raw_message) ?? gate.reason ?? "unknown";
   return {
     intent,
     confidence,
-    needs_human: gate.escalate,
-    human_summary: gate.escalate ? `Escalated: ${gate.reason}. Message: ${state.raw_message}` : undefined,
-    done: gate.escalate,
+    needs_human: true,
+    human_summary: `Escalated: ${reason}. Message: ${mask_phone_digits(state.raw_message)}`,
+    done: true,
   };
 }
 
