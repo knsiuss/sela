@@ -16,6 +16,10 @@ import {
 import { load_server_config, start_http_server } from "./http/server.js";
 import { InMemoryWebhookQueue, type WebhookJobQueue } from "./webhook_handler.js";
 import { PostgresMessageDedupe } from "./ingress/postgres_dedupe.js";
+import {
+  PostgresAtomicIngressStore,
+  type AtomicIngressStore,
+} from "./ingress/postgres_atomic_ingress.js";
 import { PostgresWebhookJobQueue } from "./queue/postgres_outbox_queue.js";
 import { PgSqlClient, load_pg_config } from "./persistence/pg_client.js";
 import type { SqlClient } from "./persistence/sql_client.js";
@@ -37,8 +41,14 @@ import {
 } from "./worker/job_store.js";
 import { StoreInboundLoader, type InboundLoader } from "./worker/inbound_loader.js";
 import { process_job, JobProcessingError, type GraphRunner, type OutboundDraft } from "./worker/process_job.js";
-import { run_worker_loop, type OutboundSenderPort, type WorkerLoopCounters } from "./worker/loop.js";
-import { build_runtime_sender } from "./outbound/runtime_sender.js";
+import {
+  run_worker_loop,
+  type OutboundSenderPort,
+  type OutboundSenderRegistry,
+  type WorkerLoopCounters,
+} from "./worker/loop.js";
+import { build_runtime_sender, resolve_runtime_tenant_id } from "./outbound/runtime_sender.js";
+import { SingleTenantOutboundSenderRegistry } from "./outbound/sender_registry.js";
 import {
   AesGcmRecipientCipher,
   EphemeralRecipientCipher,
@@ -62,7 +72,10 @@ export type GraphFactory = (calendar: CalendarPort) => GraphRunner;
 /** Optional dependencies supplied by a deployment composition root. */
 export interface CompositionOptions {
   env?: Record<string, string | undefined>;
+  /** Legacy per-sender injection; composition wraps it in a tenant binding. */
   sender?: OutboundSenderPort;
+  /** Tenant-aware production sender boundary. */
+  sender_registry?: OutboundSenderRegistry;
   calendar_factory?: (tenant_id: string) => CalendarPort;
   graph_factory?: GraphFactory;
   recipient_cipher?: RecipientCipher;
@@ -73,6 +86,7 @@ export interface CompositionOptions {
 export interface AppComposition {
   sql_client?: SqlClient;
   dedupe_store: InMemoryMessageDedupe | PostgresMessageDedupe;
+  atomic_ingress_store?: AtomicIngressStore;
   inbound_store: InboundMessageStore;
   tenant_resolver: TenantResolver;
   recipient_cipher: RecipientCipher;
@@ -81,7 +95,8 @@ export interface AppComposition {
   lifecycle: JobLifecycleStore;
   reschedule_session_store: RescheduleSessionStore;
   graph_factory: GraphFactory;
-  sender: OutboundSenderPort;
+  /** Tenant-aware sender boundary used by the worker. */
+  sender_registry: OutboundSenderRegistry;
   server?: NodeHttpServer;
   start_server(): Promise<void>;
   start_worker(): void;
@@ -97,7 +112,7 @@ export interface AppComposition {
  * USE_IN_MEMORY is exactly `true`; the default fails closed rather than
  * silently moving production data into process memory.
  *
- * @param options - Environment and optional sender/calendar injections.
+ * @param options - Environment and optional sender-registry/calendar injections.
  * @returns A stoppable composition object.
  * @throws CompositionConfigurationError or adapter configuration errors.
  */
@@ -127,6 +142,9 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
   const dedupe_store = sql_client === undefined
     ? new InMemoryMessageDedupe()
     : new PostgresMessageDedupe(sql_client);
+  const atomic_ingress_store = sql_client === undefined
+    ? undefined
+    : new PostgresAtomicIngressStore(sql_client);
   const inbound_store: InboundMessageStore = sql_client === undefined
     ? new InMemoryInboundMessageStore()
     : new PostgresInboundMessageStore(sql_client, { retention_days });
@@ -164,9 +182,9 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
   let server: NodeHttpServer | undefined;
   let worker_controller: AbortController | undefined;
   let worker_promise: Promise<WorkerLoopCounters> | undefined;
-  const sender = options.sender ?? build_runtime_sender(env);
-  const deliver = async (drafts: readonly OutboundDraft[]): Promise<void> => {
-    for (const draft of drafts) await sender.send(draft);
+  const sender_registry = resolve_outbound_sender(options, env, has_database_url);
+  const deliver = async (tenant_id: string, drafts: readonly OutboundDraft[]): Promise<void> => {
+    for (const draft of drafts) await sender_registry.send(tenant_id, draft);
   };
 
   const process_job_fn = (job: Parameters<typeof process_job>[0]["job"]): Promise<OutboundDraft[]> => {
@@ -192,6 +210,7 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
   const composition: AppComposition = {
     sql_client,
     dedupe_store,
+    atomic_ingress_store,
     inbound_store,
     tenant_resolver,
     recipient_cipher,
@@ -200,13 +219,14 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
     lifecycle,
     reschedule_session_store,
     graph_factory,
-    sender,
+    sender_registry,
     start_server: async () => {
       if (server !== undefined) return;
       const config = load_server_config(env);
       server = await start_http_server(config, {
         dedupe_store,
         job_queue,
+        atomic_ingress: atomic_ingress_store,
         tenant_resolver,
         inbound_store,
         recipient_cipher,
@@ -276,9 +296,41 @@ export async function stop_all(): Promise<void> {
   await composition.stop();
 }
 
+function resolve_outbound_sender(
+  options: CompositionOptions,
+  env: Record<string, string | undefined>,
+  is_database_backed: boolean,
+): OutboundSenderRegistry {
+  if (options.sender_registry !== undefined) {
+    if (options.sender !== undefined) {
+      throw new CompositionConfigurationError("sender-and-sender-registry-are-mutually-exclusive");
+    }
+    if (!is_outbound_sender_registry(options.sender_registry)) {
+      throw new CompositionConfigurationError("sender-registry-invalid");
+    }
+    return options.sender_registry;
+  }
+  if (options.sender !== undefined) {
+    if (!is_outbound_sender_port(options.sender)) {
+      throw new CompositionConfigurationError("sender-invalid");
+    }
+    const tenant_id = resolve_runtime_tenant_id(env, is_database_backed);
+    return new SingleTenantOutboundSenderRegistry(tenant_id, options.sender);
+  }
+  return build_runtime_sender(env);
+}
+
+function is_outbound_sender_registry(value: unknown): value is OutboundSenderRegistry {
+  return typeof value === "object" && value !== null && typeof (value as { send?: unknown }).send === "function";
+}
+
+function is_outbound_sender_port(value: unknown): value is OutboundSenderPort {
+  return typeof value === "object" && value !== null && typeof (value as { send?: unknown }).send === "function";
+}
+
 function make_in_memory_resolver(env: Record<string, string | undefined>): InMemoryTenantResolver {
   const phone_number_id = env["WHATSAPP_PHONE_NUMBER_ID"];
-  const tenant_id = env["TENANT_ID"] ?? "1";
+  const tenant_id = resolve_runtime_tenant_id(env, false);
   return phone_number_id === undefined || phone_number_id === ""
     ? new InMemoryTenantResolver()
     : new InMemoryTenantResolver({ [phone_number_id]: tenant_id });

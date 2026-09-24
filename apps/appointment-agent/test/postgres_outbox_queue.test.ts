@@ -26,7 +26,7 @@ describe("postgres_webhook_job_queue", () => {
       expect.stringContaining("INSERT INTO webhook_jobs"),
       [JOB.tenant_id, JOB.request_id, JOB.wamid, JOB.conversation_id, JOB.received_at_iso],
     );
-    expect(query.mock.calls[0]?.[0]).toContain("ON CONFLICT (wamid) DO NOTHING");
+    expect(query.mock.calls[0]?.[0]).toContain("ON CONFLICT (tenant_id, wamid) DO NOTHING");
   });
 
   it("translates a database failure without exposing driver details", async () => {

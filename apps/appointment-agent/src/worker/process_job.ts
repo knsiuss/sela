@@ -101,8 +101,8 @@ export interface ProcessJobInput {
   graph_runner?: GraphRunner;
   /** Stateful turn boundary; when omitted, the legacy graph path remains active. */
   turn_processor?: TurnProcessor;
-  /** Delivers drafts before the inbound row and job are marked processed. */
-  deliver?: (drafts: readonly OutboundDraft[]) => Promise<void>;
+  /** Delivers drafts for this job's tenant before the inbound row and job are marked processed. */
+  deliver?: (tenant_id: string, drafts: readonly OutboundDraft[]) => Promise<void>;
   max_attempts?: number;
   clock?: () => Date;
 }
@@ -116,7 +116,7 @@ export interface ProcessJobInput {
  * persistence.
  *
  * @param input - Claimed job and injected processing boundaries.
- * @returns Drafts for an injected sender, after lifecycle state is completed.
+ * @returns Drafts for the tenant-aware delivery boundary, after lifecycle state is completed.
  * @throws JobProcessingError after recording a sanitized failure.
  */
 export async function process_job(input: ProcessJobInput): Promise<OutboundDraft[]> {
@@ -185,7 +185,7 @@ export async function process_job(input: ProcessJobInput): Promise<OutboundDraft
   try {
     const inbound_message = to_inbound_message(record);
     const drafts = await build_turn_drafts(input, inbound_message, reply_target);
-    if (input.deliver !== undefined) await input.deliver(drafts);
+    if (input.deliver !== undefined) await input.deliver(tenant_id, drafts);
     await mark_processed(input.inbound_loader, record, clock);
     await input.lifecycle.complete(input.job);
     return drafts;

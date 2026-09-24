@@ -6,6 +6,7 @@ import {
 } from "node:http";
 import type { MessageDedupeStore } from "../ingress/dedupe.js";
 import type { InboundMessageStore } from "../ingress/inbound_store.js";
+import type { AtomicIngressStore } from "../ingress/postgres_atomic_ingress.js";
 import type { TenantResolver } from "../ingress/tenant_resolver.js";
 import type { RecipientCipher } from "../security/recipient_cipher.js";
 import {
@@ -55,6 +56,7 @@ export interface HttpServerConfig {
 export interface HttpServerDependencies {
   dedupe_store: MessageDedupeStore;
   job_queue: WebhookJobQueue;
+  atomic_ingress?: AtomicIngressStore;
   tenant_resolver?: TenantResolver;
   inbound_store?: InboundMessageStore;
   recipient_cipher?: RecipientCipher;
@@ -155,6 +157,7 @@ async function webhook_response(
     dependencies.job_queue,
     {
       tenant_resolver: dependencies.tenant_resolver,
+      atomic_ingress: dependencies.atomic_ingress,
       inbound_store: dependencies.inbound_store,
       recipient_cipher: dependencies.recipient_cipher,
       retention_days: dependencies.inbound_retention_days,

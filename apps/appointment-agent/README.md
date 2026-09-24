@@ -78,7 +78,9 @@ start wrapper selects `server` mode. `APP_MODE=server` starts the HTTP server
 and worker, while `APP_MODE=worker` starts only the worker. For a local
 server-only smoke run without Postgres, set `USE_IN_MEMORY=true` and provide
 `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET`, and
-`WHATSAPP_PHONE_NUMBER_ID`. Explicit in-memory mode creates an ephemeral
+`WHATSAPP_PHONE_NUMBER_ID`. The in-memory worker uses one non-network sender
+for tenant `1` by default; set `TENANT_ID` to bind that local sender to a
+different single tenant. Explicit in-memory mode creates an ephemeral
 recipient-encryption key at startup, so its encrypted rows cannot survive a
 restart; it is not a production key-management mode. On PowerShell, set the
 secrets with
@@ -95,9 +97,12 @@ the 3-second ACK SLO.
 
 Apply `packages/db/migrations/0005_inbound_messages.sql`,
 `0006_reply_target.sql`, `0007_inbound_button_id.sql`,
-`0008_worker_tenant_hardening.sql`, `0009_worker_leases.sql`, and
-`0010_reschedule_sessions.sql` after `0004_webhook_jobs.sql` before enabling
-multi-turn rescheduling in a database-backed deployment.
+`0008_worker_tenant_hardening.sql`, `0009_worker_leases.sql`,
+`0010_reschedule_sessions.sql`, and `0011_tenant_scoped_dedupe.sql` after
+`0004_webhook_jobs.sql` before enabling multi-turn rescheduling and atomic
+ingress in a database-backed deployment. Migration `0011` intentionally stops
+if legacy `processed_messages` claims cannot be reconciled to a real tenant;
+never delete dedupe claims to force the key change.
 
 `DATABASE_URL` selects the Postgres composition and must use a dedicated
 server-side role with the migration-defined `service_role` grants. The pool
@@ -153,25 +158,35 @@ sending to a reconstructed or stale destination.
 
 `webhook_jobs` contains only identifiers, status, retry metadata, and tenant
 routing. Message text, sender references, and the encrypted reply target are
-confined to the separately retained `inbound_messages` table. The default
-composition builds `WhatsAppSenderAdapter` from `@repo/wa-sender`; explicit
-`USE_IN_MEMORY=true` selects its non-network `InMemoryTransport`, while
-`WHATSAPP_TRANSPORT=meta` requires `WHATSAPP_API_TOKEN` and
-`WHATSAPP_PHONE_NUMBER_ID`. Tests may inject an `OutboundSenderPort` directly.
-Delivery leaves the explicit app key unset and lets `WhatsAppSender` derive a
-bounded key from the stable inbound WAMID and turn ordinal. The sender's
-idempotency coordinator remains process-local; a durable cross-process
-idempotency adapter is still a follow-up. The adapter also rejects
-state-changing drafts until a durable tenant- and hold-bound confirmation
-evidence port is available.
+confined to the separately retained `inbound_messages` table. The worker
+selects outbound delivery through an `OutboundSenderRegistry` that receives
+both the claimed job's `tenant_id` and one `OutboundDraft`; it never chooses a
+provider from a process-global token. `WhatsAppSenderAdapter` remains the
+per-sender implementation. Explicit `USE_IN_MEMORY=true` selects the
+non-network `InMemoryTransport` and binds it to the configured local tenant.
+A database-backed default without an injected registry requires `TENANT_ID`
+plus `WHATSAPP_API_TOKEN` and `WHATSAPP_PHONE_NUMBER_ID`; it fails closed for
+every other tenant. Multi-tenant deployments must inject a secret-backed
+`OutboundSenderRegistry` through `CompositionOptions.sender_registry`, which
+can resolve an explicit sender for each tenant and rejects missing mappings
+before provider I/O. Do not put multiple credentials in a JSON environment
+variable; load them through the deployment's secret manager and inject the
+port. Delivery leaves the explicit app key unset and lets `WhatsAppSender`
+derive a bounded key from the stable inbound WAMID and turn ordinal. The
+sender's idempotency coordinator remains process-local; a durable
+cross-process idempotency adapter is still a follow-up. The adapter also
+rejects state-changing drafts until a durable tenant- and hold-bound
+confirmation evidence port is available.
 
-Set `TENANT_ID` for a non-default runtime tenant. The CLI uses a single
-in-process package service for the local scaffold. The default composition
-caches one `SlotServiceAdapter` per tenant only inside that worker process, so
-a hold survives separate local jobs but is not durable across processes.
-Production calendar persistence/provider integration remains outside this
-cutover. Runtime slots use opaque staff/provider ids; `resource` retains the
-display label.
+Set `TENANT_ID` for a non-default single-tenant runtime binding. The CLI uses a
+single in-process package service for the local scaffold. The default
+composition caches one `SlotServiceAdapter` per tenant only inside that worker
+process, so a hold survives separate local jobs but is not durable across
+processes. Multi-tenant sender credentials and their tenant mappings remain a
+deployment concern: inject a registry backed by the secret manager rather than
+reusing the pilot's global adapter. Production calendar persistence/provider
+integration remains outside this cutover. Runtime slots use opaque
+staff/provider ids; `resource` retains the display label.
 
 The cross-tenant CLI path defaults to `CROSS_TENANT_CONSENT_GRANTED=false`
 and `CROSS_TENANT_AUTHZ_GRANTED=false`, with an empty in-memory provider. The
@@ -194,10 +209,10 @@ Meta call is made by the test suite.
 
 This hardening pass does not make the database-backed worker pilot-ready yet. Before production enablement, the repository still needs:
 
-- an atomic ingress transaction/outbox and durable reconciliation;
+- durable reconciliation for ambiguous ingress/outbound commits;
 - a durable tenant-scoped calendar writer (the current default is local scaffold);
 - an atomic reschedule contract that replaces the existing appointment; the current flow confirms a selected hold but has no old appointment target;
-- tenant-specific Meta credentials and a durable outbound idempotency/status ledger;
+- a secret-backed production `OutboundSenderRegistry` with per-tenant Meta credentials, rotation, and a durable outbound idempotency/status ledger;
 - live Postgres/Supabase RLS, role, and TLS verification.
 
 Meta transport and customer-service-window behavior follow the official

@@ -6,12 +6,25 @@ import { JobProcessingError, type OutboundDraft } from "./process_job.js";
 /** Sender port kept local so this worker does not depend on an outbound package. */
 export interface OutboundSenderPort {
   /**
-   * Send one locally built draft.
+   * Send one locally built draft through a per-sender adapter.
    *
    * @param draft - Tenant-safe outbound draft.
    * @returns Sender-specific acknowledgement.
    */
   send(draft: OutboundDraft): Promise<unknown>;
+}
+
+/** Tenant-aware port used by the worker to select a sender before provider I/O. */
+export interface OutboundSenderRegistry {
+  /**
+   * Send one draft through the sender bound to the supplied tenant.
+   *
+   * @param tenant_id - Tenant carried by the claimed job.
+   * @param draft - Tenant-safe outbound draft.
+   * @returns Sender-specific acknowledgement.
+   * @throws A sanitized registry error when the tenant has no configured sender.
+   */
+  send(tenant_id: string, draft: OutboundDraft): Promise<unknown>;
 }
 
 /** Counters returned when a worker loop stops. */
@@ -39,7 +52,7 @@ export interface WorkerLoopOptions {
  * bounded timer. Delivery is owned by the processor so completion cannot race
  * a later send. There is no tight loop when the queue is empty.
  *
- * @param options - Claim/process/sender ports and polling limits.
+ * @param options - Claim/process ports and polling limits.
  * @returns Aggregate counters after graceful stop.
  */
 export async function run_worker_loop(options: WorkerLoopOptions): Promise<WorkerLoopCounters> {

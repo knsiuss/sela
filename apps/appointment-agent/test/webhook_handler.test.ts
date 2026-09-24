@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import type { AtomicIngressStore } from "../src/ingress/postgres_atomic_ingress.js";
 import { InMemoryMessageDedupe } from "../src/ingress/dedupe.js";
 import { InMemoryInboundMessageStore } from "../src/ingress/inbound_store.js";
 import { InMemoryTenantResolver } from "../src/ingress/tenant_resolver.js";
@@ -72,6 +73,42 @@ describe("handle_inbound_request", () => {
 
     expect(result).toMatchObject({ enqueued_count: 0, unresolved_count: 1 });
     expect(queue.pending_jobs()).toHaveLength(0);
+  });
+
+  it("uses the atomic ingress path without legacy dedupe or queue calls", async () => {
+    const dedupe_store = {
+      has_seen: vi.fn(),
+      try_claim: vi.fn(),
+      release_claim: vi.fn(),
+    };
+    const queue = { enqueue: vi.fn() };
+    const atomic_ingress: AtomicIngressStore = {
+      accept: vi.fn(async ({ tenant_id, inbound_record }) => ({
+        status: "accepted" as const,
+        tenant_id,
+        wamid: inbound_record.wamid,
+      })),
+    };
+
+    const result = await handle_inbound_request(
+      RAW_BODY,
+      sign(RAW_BODY),
+      APP_SECRET,
+      dedupe_store,
+      queue,
+      { ...ingress_options(), recipient_cipher: RECIPIENT_CIPHER, atomic_ingress },
+    );
+
+    expect(result.enqueued_count).toBe(1);
+    expect(atomic_ingress.accept).toHaveBeenCalledTimes(1);
+    expect(dedupe_store.try_claim).not.toHaveBeenCalled();
+    expect(queue.enqueue).not.toHaveBeenCalled();
+    const atomic_input = vi.mocked(atomic_ingress.accept).mock.calls[0]?.[0];
+    expect(atomic_input?.inbound_record).toMatchObject({
+      tenant_id: "42",
+      wamid: "wamid.handler-regression",
+      reply_target_ciphertext: expect.stringMatching(/^v1\./),
+    });
   });
 
   it("encrypts the reply target before retention and keeps it out of jobs and audit logs", async () => {
@@ -163,7 +200,7 @@ describe("handle_inbound_request", () => {
         { ...ingress_options(), inbound_store },
       ),
     ).rejects.toBeInstanceOf(RecipientCipherError);
-    expect(await dedupe_store.has_seen("wamid.handler-regression")).toBe(false);
+    expect(await dedupe_store.has_seen("42", "wamid.handler-regression")).toBe(false);
     expect(queue.pending_jobs()).toHaveLength(0);
     expect(inbound_store.all()).toHaveLength(0);
   });
@@ -176,8 +213,8 @@ describe("handle_inbound_request", () => {
     await expect(
       handle_inbound_request(RAW_BODY, sign(RAW_BODY), APP_SECRET, store, queue, ingress_options()),
     ).rejects.toThrow(WebhookQueueError);
-    expect(release_claim).toHaveBeenCalledWith("wamid.handler-regression");
-    expect(await store.has_seen("wamid.handler-regression")).toBe(false);
+    expect(release_claim).toHaveBeenCalledWith("42", "wamid.handler-regression");
+    expect(await store.has_seen("42", "wamid.handler-regression")).toBe(false);
 
     const result = await handle_inbound_request(
       RAW_BODY,

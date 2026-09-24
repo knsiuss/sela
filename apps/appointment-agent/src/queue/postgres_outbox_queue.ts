@@ -6,7 +6,7 @@ export type { SqlClient } from "../persistence/sql_client.js";
 const INSERT_JOB_SQL = `
   INSERT INTO webhook_jobs (tenant_id, request_id, wamid, conversation_id, received_at_iso)
   VALUES ($1, $2, $3, $4, $5)
-  ON CONFLICT (wamid) DO NOTHING
+  ON CONFLICT (tenant_id, wamid) DO NOTHING
   RETURNING id
 `;
 const MAX_ID_LENGTH = 128;
@@ -71,7 +71,7 @@ export class PostgresWebhookJobQueue implements WebhookJobQueue {
   /**
    * Persist one PII-free job for a worker to claim later.
    *
-   * The unique wamid conflict is treated as idempotent success so a retry
+   * The tenant-scoped unique conflict is treated as idempotent success so a retry
    * after an ambiguous database failure cannot create duplicate work.
    *
    * Args:

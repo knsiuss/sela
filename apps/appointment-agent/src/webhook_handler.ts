@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { is_valid_signature, verify_challenge, type VerifyQuery } from "./ingress/verify.js";
 import type { MessageDedupeStore } from "./ingress/dedupe.js";
 import type { TenantResolver } from "./ingress/tenant_resolver.js";
+import type { AtomicIngressStore } from "./ingress/postgres_atomic_ingress.js";
 import {
   RecipientCipherError,
   type RecipientCipher,
@@ -71,6 +72,8 @@ export interface InboundRequestOptions {
   inbound_store?: InboundMessageStore;
   /** Encrypts the transient recipient before inbound-message persistence. */
   recipient_cipher?: RecipientCipher;
+  /** Atomically claims, retains, and enqueues Postgres-backed messages. */
+  atomic_ingress?: AtomicIngressStore;
   /** Overrides the default retention used when creating a record. */
   retention_days?: number;
 }
@@ -335,8 +338,47 @@ export async function handle_inbound_request(
       continue;
     }
 
+    const resolved_tenant_id = tenant_id;
     const conversation_id = derive_conversation_id(message.sender_phone_e164);
-    const claimed = await dedupe_store.try_claim(message.wamid);
+    const atomic_ingress = options.atomic_ingress;
+    if (atomic_ingress !== undefined) {
+      let result;
+      try {
+        result = await atomic_ingress.accept({
+          tenant_id: resolved_tenant_id,
+          request_id,
+          received_at_iso,
+          inbound_record: build_inbound_message_record({
+            tenant_id: resolved_tenant_id,
+            message,
+            recipient_cipher: require_recipient_cipher(recipient_cipher),
+            conversation_id,
+            sender_ref: conversation_id,
+            retention_days: options.retention_days,
+            now: received_at_iso,
+          }),
+        });
+      } catch (error) {
+        throw new WebhookQueueError(error);
+      }
+      if (
+        (result.status !== "accepted" && result.status !== "duplicate") ||
+        result.tenant_id !== resolved_tenant_id ||
+        result.wamid !== message.wamid
+      ) {
+        throw new WebhookQueueError(new Error("atomic-ingress-result-invalid"));
+      }
+      if (result.status === "duplicate") {
+        duplicate_count += 1;
+        log_audit_event({ request_id, conversation_id, event: "webhook_duplicate", wamid: message.wamid });
+        continue;
+      }
+      enqueued_count += 1;
+      log_audit_event({ request_id, conversation_id, event: "webhook_enqueued", wamid: message.wamid });
+      continue;
+    }
+
+    const claimed = await dedupe_store.try_claim(resolved_tenant_id, message.wamid);
     if (!claimed) {
       duplicate_count += 1;
       log_audit_event({ request_id, conversation_id, event: "webhook_duplicate", wamid: message.wamid });
@@ -344,10 +386,10 @@ export async function handle_inbound_request(
     }
 
     try {
-      if (options.inbound_store !== undefined && tenant_id !== undefined && tenant_id !== null) {
+      if (options.inbound_store !== undefined) {
         await options.inbound_store.save(
           build_inbound_message_record({
-            tenant_id,
+            tenant_id: resolved_tenant_id,
             message,
             recipient_cipher: require_recipient_cipher(recipient_cipher),
             conversation_id,
@@ -362,10 +404,10 @@ export async function handle_inbound_request(
         wamid: message.wamid,
         conversation_id,
         received_at_iso,
-        tenant_id: tenant_id ?? undefined,
+        tenant_id: resolved_tenant_id,
       });
     } catch (error) {
-      await release_claim(dedupe_store, message.wamid, error);
+      await release_claim(dedupe_store, resolved_tenant_id, message.wamid, error);
       if (error instanceof InboundMessageStoreError || error instanceof RecipientCipherError) throw error;
       throw new WebhookQueueError(error);
     }
@@ -411,11 +453,12 @@ async function resolve_tenant(
 
 async function release_claim(
   dedupe_store: MessageDedupeStore,
+  tenant_id: string,
   wamid: string,
   original_error: unknown,
 ): Promise<void> {
   try {
-    await dedupe_store.release_claim(wamid);
+    await dedupe_store.release_claim(tenant_id, wamid);
   } catch (release_error) {
     throw new WebhookQueueError(
       new AggregateError([original_error, release_error], "webhook-claim-release-failed"),

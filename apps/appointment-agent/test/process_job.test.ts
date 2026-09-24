@@ -121,6 +121,27 @@ describe("process_job", () => {
     expect(JSON.stringify(graph_state)).not.toContain(RECORD.reply_target_ciphertext!);
   });
 
+  it("does not deliver a same-tenant replay after the inbound row is processed", async () => {
+    const dependencies = make_dependencies({
+      record: { ...RECORD, processed_at: "2026-09-24T08:01:00.000Z" },
+    });
+    const deliver = vi.fn(async () => undefined);
+
+    await expect(process_job({
+      job: JOB,
+      inbound_loader: dependencies.loader,
+      recipient_cipher: dependencies.recipient_cipher,
+      calendar: dependencies.calendar,
+      lifecycle: dependencies.lifecycle,
+      graph_runner: dependencies.graph,
+      deliver,
+    })).resolves.toEqual([]);
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(dependencies.loader.mark_processed).not.toHaveBeenCalled();
+    expect(dependencies.lifecycle.complete).toHaveBeenCalledWith(JOB);
+  });
+
   it("uses an injected turn processor before delivery without invoking the legacy graph", async () => {
     const dependencies = make_dependencies();
     const deliver = vi.fn(async () => undefined);
@@ -151,7 +172,7 @@ describe("process_job", () => {
       message: expect.objectContaining({ button_id: undefined, text_body: RECORD.message_text }),
     }));
     expect(dependencies.graph.invoke).not.toHaveBeenCalled();
-    expect(deliver).toHaveBeenCalledWith([expect.objectContaining({ inbound_wamid: JOB.wamid, turn_id: "0" })]);
+    expect(deliver).toHaveBeenCalledWith("42", [expect.objectContaining({ inbound_wamid: JOB.wamid, turn_id: "0" })]);
     expect(drafts).toEqual([expect.objectContaining({ inbound_wamid: JOB.wamid, turn_id: "0" })]);
     expect(dependencies.lifecycle.complete).toHaveBeenCalledWith(JOB);
   });

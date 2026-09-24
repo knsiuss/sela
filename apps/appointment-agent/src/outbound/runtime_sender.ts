@@ -5,7 +5,8 @@ import {
   MetaGraphTransport,
   WhatsAppSender,
 } from "@repo/wa-sender";
-import type { OutboundSenderPort } from "../worker/loop.js";
+import type { OutboundSenderPort, OutboundSenderRegistry } from "../worker/loop.js";
+import { SingleTenantOutboundSenderRegistry } from "./sender_registry.js";
 import { WhatsAppSenderAdapter } from "./whatsapp_sender_adapter.js";
 
 /** Safe failure when outbound transport configuration is incomplete. */
@@ -17,24 +18,52 @@ export class RuntimeSenderConfigurationError extends Error {
   }
 }
 
+/** Default tenant used only by the explicit in-memory local pilot. */
+export const DEFAULT_IN_MEMORY_TENANT_ID = "1";
+
 /** Default Graph API base URL; deployments should pin a verified version. */
 export const DEFAULT_WHATSAPP_GRAPH_API_URL = "https://graph.facebook.com/v23.0";
 
 /**
- * Build the process sender from environment configuration.
+ * Build the fail-closed tenant registry used by runtime composition.
  *
- * Explicit in-memory mode defaults to a non-network transport. Database-backed
- * or explicitly selected Meta mode requires a tenant-scoped phone number id and
- * access token supplied by the deployment secret manager.
+ * Database-backed mode requires TENANT_ID. The in-memory local mode uses tenant
+ * `1` when TENANT_ID is absent, preserving the existing one-sender pilot without
+ * permitting another tenant to reuse it.
  *
  * @param env - Environment mapping; defaults to process.env.
- * @returns An adapter implementing the worker's sender port.
+ * @returns A registry bound to the configured runtime tenant.
  * @throws RuntimeSenderConfigurationError for invalid or missing settings.
  */
 export function build_runtime_sender(
   env: Record<string, string | undefined> = process.env,
-): OutboundSenderPort {
-  if (env["USE_IN_MEMORY"] === "true" && typeof env["DATABASE_URL"] === "string" && env["DATABASE_URL"].trim() !== "") {
+): OutboundSenderRegistry {
+  const sender = build_sender_adapter(env);
+  const tenant_id = resolve_runtime_tenant_id(env, has_database_url(env));
+  return new SingleTenantOutboundSenderRegistry(tenant_id, sender);
+}
+
+/**
+ * Resolve the tenant allowed to use the environment-built sender.
+ *
+ * @param env - Environment mapping.
+ * @param is_database_backed - Whether the composition uses persistent storage.
+ * @returns The explicit database tenant or the local in-memory default.
+ * @throws RuntimeSenderConfigurationError when a database binding is absent.
+ */
+export function resolve_runtime_tenant_id(
+  env: Record<string, string | undefined>,
+  is_database_backed: boolean,
+): string {
+  if (is_database_backed) return required_setting(env, "TENANT_ID").trim();
+  const configured = env["TENANT_ID"]?.trim();
+  return configured === undefined || configured === ""
+    ? DEFAULT_IN_MEMORY_TENANT_ID
+    : configured;
+}
+
+function build_sender_adapter(env: Record<string, string | undefined>): OutboundSenderPort {
+  if (env["USE_IN_MEMORY"] === "true" && has_database_url(env)) {
     throw new RuntimeSenderConfigurationError("database-and-in-memory-mode-are-mutually-exclusive");
   }
   const configured_mode = env["WHATSAPP_TRANSPORT"]?.trim();
@@ -62,6 +91,11 @@ export function build_runtime_sender(
       }),
     ),
   );
+}
+
+function has_database_url(env: Record<string, string | undefined>): boolean {
+  const value = env["DATABASE_URL"];
+  return typeof value === "string" && value.trim() !== "";
 }
 
 function required_setting(env: Record<string, string | undefined>, name: string): string {

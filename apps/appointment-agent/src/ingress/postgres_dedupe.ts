@@ -1,27 +1,30 @@
 import type { SqlClient, SqlQueryResult } from "../persistence/sql_client.js";
 import {
   DedupeStoreError,
+  assert_valid_tenant_id,
   assert_valid_wamid,
 } from "./dedupe_contract.js";
 import type { MessageDedupeStore } from "./dedupe.js";
 
 export type { SqlClient, SqlQueryResult } from "../persistence/sql_client.js";
 
+// Keep tenant predicates explicit even for service_role: it bypasses RLS, while
+// the client roles are denied access to this server-only table by the schema.
 const INSERT_CLAIM_SQL = `
-  INSERT INTO processed_messages (wamid)
-  VALUES ($1)
-  ON CONFLICT (wamid) DO NOTHING
-  RETURNING wamid
+  INSERT INTO processed_messages (tenant_id, wamid)
+  VALUES ($1, $2)
+  ON CONFLICT (tenant_id, wamid) DO NOTHING
+  RETURNING tenant_id, wamid
 `;
 const SELECT_CLAIM_SQL = `
-  SELECT wamid
+  SELECT tenant_id, wamid
   FROM processed_messages
-  WHERE wamid = $1
+  WHERE tenant_id = $1 AND wamid = $2
   LIMIT 1
 `;
 const RELEASE_CLAIM_SQL = `
   DELETE FROM processed_messages
-  WHERE wamid = $1
+  WHERE tenant_id = $1 AND wamid = $2
 `;
 
 /** Run a parameterized query and validate the small result shape the adapter needs. */
@@ -48,7 +51,7 @@ function is_unique_violation(error: unknown): boolean {
   return false;
 }
 
-/** Postgres claim store backed by the unique `processed_messages.wamid` key. */
+/** Postgres claim store backed by the tenant-scoped processed-message key from migration 0011. */
 export class PostgresMessageDedupe implements MessageDedupeStore {
   private readonly sql_client: SqlClient | undefined;
 
@@ -63,41 +66,33 @@ export class PostgresMessageDedupe implements MessageDedupeStore {
   }
 
   /**
-   * Check whether a message id has already been claimed.
+   * Check whether a message id has already been claimed for a tenant.
    *
-   * Args:
-   *   wamid: Stable Meta message id.
-   *
-   * Returns:
-   *   True when a persisted claim exists.
-   *
-   * Raises:
-   *   InvalidWamidError: If the id is empty or too long.
-   *   DedupeStoreError: If the SQL client is missing or the query fails.
+   * @param tenant_id - Owning tenant.
+   * @param wamid - Stable Meta message id.
+   * @returns True when a persisted tenant-scoped claim exists.
+   * @throws InvalidTenantIdError or InvalidWamidError for invalid input.
+   * @throws DedupeStoreError when the SQL client is missing or the query fails.
    */
-  async has_seen(wamid: string): Promise<boolean> {
-    assert_valid_wamid(wamid);
-    const row_count = await this.execute(SELECT_CLAIM_SQL, [wamid]);
+  async has_seen(tenant_id: string, wamid: string): Promise<boolean> {
+    assert_dedupe_identity(tenant_id, wamid);
+    const row_count = await this.execute(SELECT_CLAIM_SQL, [tenant_id, wamid]);
     return row_count > 0;
   }
 
   /**
-   * Atomically claim a message id exactly once.
+   * Atomically claim a tenant/message pair exactly once.
    *
-   * Args:
-   *   wamid: Stable Meta message id.
-   *
-   * Returns:
-   *   True when this caller inserted the claim, false for a duplicate.
-   *
-   * Raises:
-   *   InvalidWamidError: If the id is empty or too long.
-   *   DedupeStoreError: If the SQL client is missing or the query fails.
+   * @param tenant_id - Owning tenant.
+   * @param wamid - Stable Meta message id.
+   * @returns True when this caller inserted the claim, false for a duplicate.
+   * @throws InvalidTenantIdError or InvalidWamidError for invalid input.
+   * @throws DedupeStoreError when the SQL client is missing or the query fails.
    */
-  async try_claim(wamid: string): Promise<boolean> {
-    assert_valid_wamid(wamid);
+  async try_claim(tenant_id: string, wamid: string): Promise<boolean> {
+    assert_dedupe_identity(tenant_id, wamid);
     try {
-      const row_count = await this.execute(INSERT_CLAIM_SQL, [wamid]);
+      const row_count = await this.execute(INSERT_CLAIM_SQL, [tenant_id, wamid]);
       return row_count > 0;
     } catch (error) {
       if (is_unique_violation(error)) return false;
@@ -106,18 +101,17 @@ export class PostgresMessageDedupe implements MessageDedupeStore {
   }
 
   /**
-   * Remove a claim after enqueue failure so Meta retries remain processable.
+   * Remove a tenant/message claim after enqueue failure so retries remain processable.
    *
-   * Args:
-   *   wamid: Stable Meta message id to release.
-   *
-   * Raises:
-   *   InvalidWamidError: If the id is empty or too long.
-   *   DedupeStoreError: If the SQL client is missing or the query fails.
+   * @param tenant_id - Owning tenant.
+   * @param wamid - Stable Meta message id to release.
+   * @returns Nothing.
+   * @throws InvalidTenantIdError or InvalidWamidError for invalid input.
+   * @throws DedupeStoreError when the SQL client is missing or the query fails.
    */
-  async release_claim(wamid: string): Promise<void> {
-    assert_valid_wamid(wamid);
-    await this.execute_write(RELEASE_CLAIM_SQL, [wamid]);
+  async release_claim(tenant_id: string, wamid: string): Promise<void> {
+    assert_dedupe_identity(tenant_id, wamid);
+    await this.execute_write(RELEASE_CLAIM_SQL, [tenant_id, wamid]);
   }
 
   private require_client(): SqlClient {
@@ -147,4 +141,9 @@ export class PostgresMessageDedupe implements MessageDedupeStore {
       throw new DedupeStoreError("postgres-dedupe-query-failed", error);
     }
   }
+}
+
+function assert_dedupe_identity(tenant_id: string, wamid: string): void {
+  assert_valid_tenant_id(tenant_id);
+  assert_valid_wamid(wamid);
 }

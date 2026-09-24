@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { build_composition, CompositionConfigurationError } from "../src/composition.js";
 import { PostgresRescheduleSessionStore } from "../src/reschedule/postgres_session_store.js";
 import { InMemoryRescheduleSessionStore } from "../src/reschedule/session_store.js";
+import type { OutboundSenderPort, OutboundSenderRegistry } from "../src/worker/loop.js";
 
 describe("composition", () => {
   it("fails closed when neither Postgres nor explicit in-memory mode is configured", () => {
@@ -36,7 +37,7 @@ describe("composition", () => {
         WHATSAPP_PHONE_NUMBER_ID: "phone-local",
       },
     });
-    expect(composition.sender).toBeDefined();
+    expect(composition.sender_registry).toBeDefined();
     return composition.stop();
   });
 
@@ -71,11 +72,65 @@ describe("composition", () => {
         DATABASE_URL: "postgres://test.invalid/app",
         WHATSAPP_PHONE_NUMBER_ID: "phone-test",
         WHATSAPP_API_TOKEN: "configured-test-token",
+        TENANT_ID: "42",
         WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64: Buffer.alloc(32, 4).toString("base64"),
       },
     });
     expect(composition.reschedule_session_store).toBeInstanceOf(PostgresRescheduleSessionStore);
     await composition.stop();
+  });
+
+  it("accepts an injected sender registry for database-backed deployment wiring", async () => {
+    const sender_registry = { send: vi.fn(async () => ({ status: "sent" })) };
+    const composition = build_composition({
+      env: {
+        DATABASE_URL: "postgres://test.invalid/app",
+        WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64: Buffer.alloc(32, 4).toString("base64"),
+      },
+      sender_registry,
+    });
+
+    expect(composition.sender_registry).toBe(sender_registry);
+    await composition.stop();
+  });
+
+  it("rejects conflicting legacy sender and registry injections", () => {
+    expect(() =>
+      build_composition({
+        env: { USE_IN_MEMORY: "true" },
+        sender: { send: async () => undefined },
+        sender_registry: { send: async () => undefined },
+      }),
+    ).toThrow("sender-and-sender-registry-are-mutually-exclusive");
+  });
+
+  it("rejects a malformed injected sender registry", () => {
+    const invalid_registry = { send: "not-a-function" } as unknown as OutboundSenderRegistry;
+
+    expect(() =>
+      build_composition({ env: { USE_IN_MEMORY: "true" }, sender_registry: invalid_registry }),
+    ).toThrow("sender-registry-invalid");
+  });
+
+  it("rejects a malformed legacy per-sender injection", () => {
+    const invalid_sender = { send: "not-a-function" } as unknown as OutboundSenderPort;
+
+    expect(() =>
+      build_composition({ env: { USE_IN_MEMORY: "true" }, sender: invalid_sender }),
+    ).toThrow("sender-invalid");
+  });
+
+  it("fails closed when database-backed runtime credentials have no tenant binding", () => {
+    expect(() =>
+      build_composition({
+        env: {
+          DATABASE_URL: "postgres://test.invalid/app",
+          WHATSAPP_PHONE_NUMBER_ID: "phone-test",
+          WHATSAPP_API_TOKEN: "configured-test-token",
+          WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64: Buffer.alloc(32, 4).toString("base64"),
+        },
+      }),
+    ).toThrow("TENANT_ID-required");
   });
 
   it("requires a production recipient key whenever Postgres is configured", () => {
