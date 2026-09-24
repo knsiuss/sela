@@ -1,37 +1,11 @@
-const MAX_WAMID_LENGTH = 128;
+import { assert_valid_wamid } from "./dedupe_contract.js";
 
-export class InvalidWamidError extends Error {
-  constructor() {
-    super("invalid-wamid");
-    this.name = "InvalidWamidError";
-  }
-}
-
-export class DedupeStoreError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "DedupeStoreError";
-  }
-}
+export { DedupeStoreError, InvalidWamidError, assert_valid_wamid } from "./dedupe_contract.js";
 
 export interface MessageDedupeStore {
   has_seen(wamid: string): Promise<boolean>;
   try_claim(wamid: string): Promise<boolean>;
-}
-
-/**
- * Validate a WhatsApp message id before any store access.
- *
- * Args:
- *   wamid: Stable Meta message id (wamid.*).
- *
- * Raises:
- *   InvalidWamidError: If the id is empty or exceeds the length bound.
- */
-export function assert_valid_wamid(wamid: string): void {
-  if (typeof wamid !== "string" || wamid.length === 0 || wamid.length > MAX_WAMID_LENGTH) {
-    throw new InvalidWamidError();
-  }
+  release_claim(wamid: string): Promise<void>;
 }
 
 /** In-memory dedupe store for tests and local dev. */
@@ -76,27 +50,20 @@ export class InMemoryMessageDedupe implements MessageDedupeStore {
     this.seen_ids.add(wamid);
     return true;
   }
-}
 
-/**
- * Postgres dedupe store backed by a unique constraint on wamid.
- *
- * Not yet wired: production inserts into a table such as
- * processed_messages(wamid PK, created_at) and maps a unique
- * violation to "duplicate" (return false from try_claim).
- */
-// TODO(backend): Wire PostgresMessageDedupe to the app datasource after the processed_messages table lands.
-export class PostgresMessageDedupe implements MessageDedupeStore {
   /**
-   * Create the store. Holds no connection itself; pass a query runner later.
+   * Release a claim after its downstream enqueue step failed.
+   *
+   * Args:
+   *   wamid: Stable Meta message id whose claim should be removed.
+   *
+   * Raises:
+   *   InvalidWamidError: If the id is empty or too long.
    */
-  constructor() {}
-
-  async has_seen(_wamid: string): Promise<boolean> {
-    throw new DedupeStoreError("postgres-dedupe-not-wired");
-  }
-
-  async try_claim(_wamid: string): Promise<boolean> {
-    throw new DedupeStoreError("postgres-dedupe-not-wired");
+  async release_claim(wamid: string): Promise<void> {
+    assert_valid_wamid(wamid);
+    this.seen_ids.delete(wamid);
   }
 }
+
+export { PostgresMessageDedupe } from "./postgres_dedupe.js";

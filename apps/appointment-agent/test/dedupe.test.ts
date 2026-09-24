@@ -28,9 +28,10 @@ describe("in_memory_message_dedupe", () => {
 });
 
 describe("postgres_message_dedupe", () => {
-  it("test_stub_fails_loud_until_table_is_wired", async () => {
+  it("test_fails_loud_when_the_sql_client_is_missing", async () => {
     const store = new PostgresMessageDedupe();
     await expect(store.try_claim("wamid.test-1")).rejects.toThrow(DedupeStoreError);
     await expect(store.has_seen("wamid.test-1")).rejects.toThrow(DedupeStoreError);
+    await expect(store.release_claim("wamid.test-1")).rejects.toThrow(DedupeStoreError);
   });
 });

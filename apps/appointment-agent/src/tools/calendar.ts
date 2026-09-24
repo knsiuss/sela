@@ -23,9 +23,14 @@ export class HoldExpiredError extends Error {
  */
 export interface CalendarPort {
   list_slots(window_start_iso: string, window_end_iso: string): Promise<TimeSlot[]>;
+  /**
+   * Hold a slot. Implementations that persist externally may use the optional
+   * stable key to make the hold write idempotent.
+   */
   hold_slot(
     slot_id: string,
     ttl_seconds: number,
+    idempotency_key?: string,
   ): Promise<Pick<SlotHold, "hold_id" | "expires_at_iso">>;
   confirm_hold(hold_id: string, idempotency_key: string): Promise<void>;
   release_hold(hold_id: string): Promise<void>;

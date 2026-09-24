@@ -103,6 +103,8 @@ export class SlotServiceAdapter implements CalendarPort {
    * Args:
    *   slot_id: App slot identifier.
    *   ttl_seconds: Requested lifetime; capped at the package maximum.
+   *   _idempotency_key: Optional external retry key; the in-memory service uses
+   *     its own hold identity and does not persist caller keys.
    *
    * Returns:
    *   The app hold shape with the package-computed ISO expiry.
@@ -110,7 +112,11 @@ export class SlotServiceAdapter implements CalendarPort {
    * Raises:
    *   SlotUnavailableError: If the slot is unknown, held, or confirmed.
    */
-  async hold_slot(slot_id: string, ttl_seconds: number = HOLD_TTL_SECONDS): Promise<SlotHold> {
+  async hold_slot(
+    slot_id: string,
+    ttl_seconds: number = HOLD_TTL_SECONDS,
+    _idempotency_key?: string,
+  ): Promise<SlotHold> {
     const mapped_slot = this.require_slot(slot_id);
     const requested_ttl_seconds = clamp_hold_ttl_seconds(ttl_seconds);
     let hold: Hold;

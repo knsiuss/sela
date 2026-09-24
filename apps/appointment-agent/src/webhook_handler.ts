@@ -23,8 +23,8 @@ export class WebhookSignatureError extends Error {
 }
 
 export class WebhookQueueError extends Error {
-  constructor() {
-    super("webhook-enqueue-failed");
+  constructor(cause?: unknown) {
+    super("webhook-enqueue-failed", cause === undefined ? undefined : { cause });
     this.name = "WebhookQueueError";
   }
 }
@@ -305,8 +305,15 @@ export async function handle_inbound_request(
     }
     try {
       await job_queue.enqueue({ request_id, wamid: message.wamid, conversation_id, received_at_iso });
-    } catch {
-      throw new WebhookQueueError();
+    } catch (enqueue_error) {
+      try {
+        await dedupe_store.release_claim(message.wamid);
+      } catch (release_error) {
+        throw new WebhookQueueError(
+          new AggregateError([enqueue_error, release_error], "webhook-claim-release-failed"),
+        );
+      }
+      throw new WebhookQueueError(enqueue_error);
     }
     enqueued_count += 1;
     log_audit_event({ request_id, conversation_id, event: "webhook_enqueued", wamid: message.wamid });

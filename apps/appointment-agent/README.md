@@ -57,11 +57,37 @@ privacy review are complete.
 
 ## Run
 
+The default `APP_MODE=cli` preserves the local message flow:
+
 ```bash
 pnpm install
 pnpm test
 pnpm dev -- "I would like to reschedule to Thursday afternoon, can I?"
+pnpm dev -- --voice-note "besok sore"
 ```
+
+To run the Node HTTP ingress instead, provide the verification token and app
+secret from the environment and use the server start script:
+
+```bash
+pnpm start
+```
+
+`pnpm dev` and direct `tsx src/index.ts` keep the default `APP_MODE=cli`; the
+start wrapper selects `server` mode. `APP_MODE=server` may also be set
+explicitly. On PowerShell, set the secrets with
+`$env:WHATSAPP_VERIFY_TOKEN="..."` and `$env:WHATSAPP_APP_SECRET="..."` before
+running `pnpm start`.
+
+The server exposes `GET /healthz`, Meta verification on
+`GET /webhooks/whatsapp`, and signed deliveries on `POST /webhooks/whatsapp`.
+Responses are marked `Cache-Control: no-store`; the POST body is limited to
+`MAX_WEBHOOK_BYTES` and the HTTP route has a bounded response deadline below
+the 3-second ACK SLO. The CLI/server composition currently uses in-memory
+adapters because this cutover does not add a Postgres driver. The
+`PostgresMessageDedupe` and `PostgresWebhookJobQueue` adapters are unit-tested
+with the minimal `SqlClient` port for a deployment composition root; the
+`0004` migration supplies their tables.
 
 Set `TENANT_ID` for a non-default runtime tenant. The CLI uses a single
 in-process package service for the local scaffold; production persistence and
