@@ -2,8 +2,7 @@ import { StateGraph, START, END, interrupt } from "@langchain/langgraph";
 import { AppointmentState, type AppointmentStateType } from "./state.js";
 import { classify_intent, needs_human } from "./guardrails.js";
 import type { CalendarPort } from "./tools/calendar.js";
-
-const HOLD_TTL_SECONDS = Number(process.env.HOLD_TTL_SECONDS ?? 300);
+import { HOLD_TTL_SECONDS } from "./tools/hold_ttl.js";
 
 function parse_message(state: AppointmentStateType): Partial<AppointmentStateType> {
   const { intent, confidence } = classify_intent(state.raw_message);

@@ -7,13 +7,16 @@
  */
 import { z } from "zod";
 
-/** Default embedding model for this deployment (Ollama, runs fully local). */
-export const DEFAULT_EMBEDDING_MODEL = "nomic-embed-text";
+/** Default embedding model matching the 1536-dimension pgvector schema. */
+export const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small";
 
 /** Provider serving the default embedding model. */
-export const DEFAULT_EMBEDDING_PROVIDER = "ollama";
+export const DEFAULT_EMBEDDING_PROVIDER = "openai";
 
-/** Version tag of the embedding weights. Changing models requires full re-embed. */
+/** Vector width used by the default model and database migration. */
+export const DEFAULT_EMBEDDING_DIMENSIONS = 1536;
+
+/** Version tag of the deployment's embedding configuration. */
 export const DEFAULT_EMBEDDING_VERSION = "v1";
 
 /** Verticals supported by the starter SOP packs. */

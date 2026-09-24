@@ -120,4 +120,30 @@ describe("slot service", () => {
       }),
     ).toThrow(AppointmentNotFoundError);
   });
+
+  it("test_release_hold_is_tenant_scoped_and_idempotent", () => {
+    const hold = service.hold_slot({ tenant_id: TENANT_ID, provider_id: PROVIDER_ID, ...WINDOW_ONE });
+
+    expect(service.release_hold({ hold_id: hold.hold_id, tenant_id: "tenant_other" })).toBe(false);
+    expect(service.check_availability({ tenant_id: TENANT_ID, provider_id: PROVIDER_ID, ...WINDOW_ONE })).toBe(false);
+    expect(service.release_hold({ hold_id: hold.hold_id, tenant_id: TENANT_ID })).toBe(true);
+    expect(service.release_hold({ hold_id: hold.hold_id, tenant_id: TENANT_ID })).toBe(false);
+    expect(service.check_availability({ tenant_id: TENANT_ID, provider_id: PROVIDER_ID, ...WINDOW_ONE })).toBe(true);
+  });
+
+  it("test_cancel_booking_frees_window_only_for_owning_tenant", () => {
+    const hold = service.hold_slot({ tenant_id: TENANT_ID, provider_id: PROVIDER_ID, ...WINDOW_ONE });
+    const appointment = service.confirm_hold({
+      hold_id: hold.hold_id,
+      tenant_id: TENANT_ID,
+      idempotency_key: "cancel-key",
+    });
+
+    service.cancel_booking({ appointment_id: appointment.id, tenant_id: "tenant_other" });
+    expect(service.check_availability({ tenant_id: TENANT_ID, provider_id: PROVIDER_ID, ...WINDOW_ONE })).toBe(false);
+    service.cancel_booking({ appointment_id: appointment.id, tenant_id: TENANT_ID });
+    expect(service.check_availability({ tenant_id: TENANT_ID, provider_id: PROVIDER_ID, ...WINDOW_ONE })).toBe(true);
+    service.cancel_booking({ appointment_id: appointment.id, tenant_id: TENANT_ID });
+    expect(service.get_appointment({ appointment_id: appointment.id, tenant_id: TENANT_ID })?.status).toBe("cancelled");
+  });
 });

@@ -21,6 +21,7 @@ CREATE TABLE knowledge_chunks (
     doc_id            TEXT NOT NULL REFERENCES knowledge_documents (doc_id) ON DELETE CASCADE,
     section           TEXT NOT NULL,
     content           TEXT NOT NULL,
+    metadata          JSONB NOT NULL,
     search_vector     TSVECTOR GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED,
     embedding         VECTOR(1536),
     embedding_model   TEXT NOT NULL,

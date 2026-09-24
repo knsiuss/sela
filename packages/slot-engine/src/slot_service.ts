@@ -13,7 +13,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { HoldStore } from "./hold_store.js";
+import { HoldStore, type ReleaseHoldParams } from "./hold_store.js";
 import {
   appointment_schema,
   availability_query_schema,
@@ -60,6 +60,11 @@ export interface SlotServiceOptions {
 
 export interface GetAppointmentParams {
   appointment_id: string;
+  tenant_id: string;
+}
+
+/** Tenant-scoped hold release request. */
+export interface ReleaseHoldRequest extends ReleaseHoldParams {
   tenant_id: string;
 }
 
@@ -189,6 +194,47 @@ export class SlotService {
     const appointment = this.write_confirmed_appointment(hold, request.idempotency_key);
     this.hold_store.release({ hold_id: hold.hold_id });
     return { ...appointment };
+  }
+
+  /**
+   * Release a hold without confirming it.
+   *
+   * Args:
+   *   params: Hold id and owning tenant id.
+   *
+   * Returns:
+   *   True when a hold was removed, false when it was already absent.
+   */
+  release_hold(params: ReleaseHoldRequest): boolean {
+    const hold = this.hold_store.find_hold({ hold_id: params.hold_id });
+    if (!hold || hold.tenant_id !== params.tenant_id) return false;
+    return this.hold_store.release({ hold_id: params.hold_id });
+  }
+
+  /**
+   * Cancel a confirmed appointment within its tenant.
+   *
+   * Unknown or foreign-tenant ids are treated as already absent so a
+   * duplicate cancellation is safe and does not disclose another tenant's
+   * appointment state.
+   *
+   * Args:
+   *   params: Appointment id and tenant id.
+   *
+   * Returns:
+   *   Nothing; the appointment is left unchanged when it is not found.
+   */
+  cancel_booking(params: GetAppointmentParams): void {
+    const stored = this.appointments.get(params.appointment_id);
+    if (!stored || stored.tenant_id !== params.tenant_id || stored.status === "cancelled") return;
+
+    const cancelled = appointment_schema.parse({
+      ...stored,
+      status: "cancelled",
+      updated_at: new Date(this.clock()).toISOString(),
+    });
+    this.appointments.set(cancelled.id, cancelled);
+    log_event("appointment_cancelled", { appointment_id: cancelled.id });
   }
 
   /**

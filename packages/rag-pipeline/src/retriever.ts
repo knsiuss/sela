@@ -1,10 +1,4 @@
-/** Tenant-scoped retrieval: mandatory filter, rerank, precedence, audit.
- *
- * Implements doc 08 section 7: filter first on tenant_id, retrieve top 20 by
- * vector similarity, rerank to top 5, drop weak matches (clarify instead),
- * and sort tenant SOPs above vertical defaults. There is no unfiltered
- * search path in this module; a missing tenant fails closed.
- */
+/** Tenant-scoped retrieval with mandatory filters, precedence, and audit. */
 import { createHash } from "node:crypto";
 import {
   type CandidateChunk,
@@ -76,12 +70,12 @@ export function build_tenant_filter(
   placeholder_index += 1;
 
   if (scope.vertical !== undefined) {
-    conditions.push(`vertical = $${placeholder_index}`);
+    conditions.push(`metadata ->> 'vertical' = $${placeholder_index}`);
     params.push(scope.vertical);
     placeholder_index += 1;
   }
   if (scope.locale !== undefined) {
-    conditions.push(`locale = $${placeholder_index}`);
+    conditions.push(`metadata ->> 'locale' = $${placeholder_index}`);
     params.push(scope.locale);
     placeholder_index += 1;
   }
@@ -91,7 +85,7 @@ export function build_tenant_filter(
 /** Arguments for building the pgvector similarity query. */
 export interface RetrievalQueryInput {
   candidate_limit?: number;
-  embedding_placeholder?: string;
+  embedding_value: string | number[];
   scope?: RetrievalScope;
   tenant_id: string;
 }
@@ -102,37 +96,63 @@ export interface RetrievalQuery {
   values: Array<string | boolean | number>;
 }
 
+/** Raised when vector retrieval input cannot be bound safely. */
+export class InvalidRetrievalQueryError extends Error {
+  constructor(message: string) {
+    super(`invalid retrieval query: ${message}`);
+    this.name = "InvalidRetrievalQueryError";
+  }
+}
+
+function serialize_embedding_value(embedding_value: string | number[]): string {
+  if (typeof embedding_value === "string") {
+    if (embedding_value.trim() === "") {
+      throw new InvalidRetrievalQueryError("embedding_value must not be empty");
+    }
+    return embedding_value;
+  }
+  if (!embedding_value.every(Number.isFinite)) {
+    throw new InvalidRetrievalQueryError("embedding_value must contain finite numbers");
+  }
+  return JSON.stringify(embedding_value);
+}
+
 /**
  * Build the tenant-scoped pgvector nearest-neighbor query.
  *
- * Orders by cosine distance ascending and caps at RETRIEVE_TOP_K. The query
- * embedding itself is driver-specific (vector serialization differs), so the
- * caller supplies its placeholder expression and this builder only appends
- * the filter values in order.
+ * The serialized embedding is always bound as `$1`; tenant and scope values
+ * follow in matching placeholder order. Orders by cosine distance and never
+ * interpolates the embedding, tenant, or scope into SQL text.
  *
- * @param query_input Tenant, scope, and embedding placeholder.
- * @returns Parameterized SQL text with ordered values.
+ * @param query_input Tenant, optional scope, vector, and candidate limit.
+ * @returns Parameterized SQL and values ready for a pg driver.
  * @throws MissingTenantFilterError when tenant_id is empty.
+ * @throws InvalidRetrievalQueryError for an invalid vector or limit.
  */
 export function build_retrieval_query(
   query_input: RetrievalQueryInput,
 ): RetrievalQuery {
   const candidate_limit = query_input.candidate_limit ?? RETRIEVE_TOP_K;
-  const embedding_placeholder = query_input.embedding_placeholder ?? "$1";
+  if (!Number.isInteger(candidate_limit) || candidate_limit <= 0) {
+    throw new InvalidRetrievalQueryError("candidate_limit must be a positive integer");
+  }
   const filter = build_tenant_filter(
     query_input.tenant_id,
     query_input.scope ?? {},
     2,
   );
   const text = [
-    "SELECT chunk_id, content, metadata, embedding <=> " +
-      `${embedding_placeholder}::vector AS distance`,
-    "FROM rag_chunks",
+    "SELECT chunk_id, content, metadata,",
+    "embedding <=> $1::vector AS distance",
+    "FROM knowledge_chunks",
     `WHERE ${filter.where_clause}`,
     "ORDER BY distance ASC",
-    `LIMIT ${Math.trunc(candidate_limit)}`,
+    `LIMIT ${candidate_limit}`,
   ].join("\n");
-  return { text, values: filter.params };
+  return {
+    text,
+    values: [serialize_embedding_value(query_input.embedding_value), ...filter.params],
+  };
 }
 
 /**

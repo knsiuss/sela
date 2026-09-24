@@ -33,5 +33,6 @@ export {
   SlotService,
   SlotUnavailableError,
   type GetAppointmentParams,
+  type ReleaseHoldRequest,
   type SlotServiceOptions,
 } from "./slot_service.js";

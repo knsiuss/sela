@@ -1,15 +1,17 @@
 # @repo/rag-pipeline
 
-Retrieval helpers for clinic knowledge (policies, FAQs, schedules) shared
-by appointment apps.
+Canonical RAG package for tenant-scoped clinic knowledge (policies, FAQs, and
+operating procedures).
 
-## Status
+## Modules
 
-Active. Implements tenant-scoped chunking (`src/chunker.ts`), retrieval
-with relevance threshold and audit (`src/retriever.ts`), and zod schemas
-for chunk metadata (`src/rag_types.ts`).
+- `src/chunker.ts` — bounded policy-aware chunking and PII rejection.
+- `src/retriever.ts` — tenant-filtered vector retrieval, precedence, and audit.
+- `src/hybrid_search.ts` — tenant-filtered FTS/vector retrieval and RRF.
+- `src/embedding_providers.ts` — versioned fake and OpenAI providers.
+- `src/eval_golden_set.ts` — recall@k against labeled questions.
+- `src/scrub.ts` — fail-closed pre-embedding PII and secret handling.
 
-## Layout
-
-- `src/index.ts` — placeholder passage type and retriever signature.
-- `tsconfig.json` — extends the root `tsconfig.base.json`.
+The database contract is defined by `packages/db/migrations/0003_rag.sql`.
+Local infrastructure and embedding operations are documented in
+`pgvector_infra.md`.

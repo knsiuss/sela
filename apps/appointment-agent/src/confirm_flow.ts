@@ -1,4 +1,5 @@
 import { HoldExpiredError, type CalendarPort } from "./tools/calendar.js";
+import { HOLD_TTL_SECONDS } from "./tools/hold_ttl.js";
 import {
   button_set_schema,
   MAX_BUTTONS_PER_MESSAGE,
@@ -20,8 +21,8 @@ export class ConfirmHoldExpiredError extends Error {
   }
 }
 
-/** Default hold lifetime; the lower bound of the 5-10 minute booking pipeline window. */
-export const DEFAULT_HOLD_TTL_SECONDS = 300;
+/** Default hold lifetime; resolved from the shared app TTL policy. */
+export const DEFAULT_HOLD_TTL_SECONDS = HOLD_TTL_SECONDS;
 
 /** Booking confirmation context carried across turns so users never repeat input. */
 export interface ConfirmContext {

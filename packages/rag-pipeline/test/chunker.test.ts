@@ -1,11 +1,13 @@
 /** Unit tests for policy-aware chunking. */
 import { describe, expect, it } from "vitest";
 import {
+  MAX_CHUNK_TOKENS,
   build_chunk_id,
   estimate_token_count,
   pack_units_into_chunks,
   split_document_into_chunks,
   split_into_atomic_units,
+  split_oversized_unit,
 } from "../src/chunker.js";
 import { UnsafeChunkError } from "../src/scrub.js";
 import type { ChunkDocumentInput } from "../src/chunker.js";
@@ -71,7 +73,7 @@ describe("split_document_into_chunks", () => {
     for (const chunk of chunks) {
       expect(chunk.content.includes("+1-555-010-2030")).toBe(false);
       expect(chunk.metadata.tenant_id).toBe("clinic_a");
-      expect(chunk.metadata.embedding_model).toBe("nomic-embed-text");
+      expect(chunk.metadata.embedding_model).toBe("text-embedding-3-small");
     }
   });
 
@@ -95,6 +97,40 @@ describe("split_document_into_chunks", () => {
     for (const chunk of chunks.slice(0, -1)) {
       expect(chunk.token_count >= 300).toBe(true);
     }
+  });
+
+  it("splits unpunctuated oversized text by words and characters", () => {
+    const unpunctuated = `${"alpha ".repeat(1_000)}${"z".repeat(MAX_CHUNK_TOKENS * 4 + 25)}`;
+    const parts = split_oversized_unit(unpunctuated);
+
+    expect(parts.length > 2).toBe(true);
+    for (const part of parts) {
+      expect(estimate_token_count(part)).toBeLessThanOrEqual(MAX_CHUNK_TOKENS);
+    }
+  });
+
+  it("retains a short middle sentinel while enforcing the hard ceiling", () => {
+    const long_policy = "Patients must follow the published cancellation policy. ".repeat(240);
+    const body = `${long_policy}\n\nSENTINEL_SHORT_SECTION\n\n${long_policy}`;
+
+    const chunks = split_document_into_chunks(body, build_test_input());
+
+    expect(chunks.some((chunk) => chunk.content.includes("SENTINEL_SHORT_SECTION"))).toBe(true);
+    for (const chunk of chunks) {
+      expect(chunk.token_count).toBeLessThanOrEqual(MAX_CHUNK_TOKENS);
+      expect(estimate_token_count(chunk.content)).toBeLessThanOrEqual(MAX_CHUNK_TOKENS);
+    }
+  });
+
+  it("merges a short middle unit backward instead of dropping it", () => {
+    const packed = pack_units_into_chunks([
+      "alpha".repeat(464),
+      "SENTINEL_SHORT_SECTION",
+      "omega".repeat(800),
+    ]);
+
+    expect(packed[0]?.content).toContain("SENTINEL_SHORT_SECTION");
+    expect(packed[0]?.token_count).toBeLessThanOrEqual(MAX_CHUNK_TOKENS);
   });
 
   it("keeps chunk overlap within the mandated band", () => {

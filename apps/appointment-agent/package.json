@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@langchain/core": "^0.3.0",
+    "@repo/slot-engine": "workspace:*",
     "@langchain/langgraph": "^0.2.0",
     "dotenv": "^16.4.5",
     "zod": "^3.23.8"

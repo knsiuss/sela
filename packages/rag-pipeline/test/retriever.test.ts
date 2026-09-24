@@ -1,6 +1,7 @@
 /** Unit tests for tenant-scoped retrieval, precedence, and audit safety. */
 import { describe, expect, it } from "vitest";
 import {
+  InvalidRetrievalQueryError,
   MissingTenantFilterError,
   RETRIEVE_TOP_K,
   build_retrieval_audit_entry,
@@ -20,7 +21,7 @@ function build_test_chunk(overrides: Partial<SopChunk> = {}): SopChunk {
     metadata: {
       doc_id: "sop_reschedule_v3",
       effective_from: "2026-01-01",
-      embedding_model: "nomic-embed-text",
+      embedding_model: "text-embedding-3-small",
       embedding_version: "v1",
       is_active: true,
       locale: "en",
@@ -47,8 +48,8 @@ describe("build_tenant_filter", () => {
       locale: "en",
       vertical: "dental",
     });
-    expect(filter.where_clause.includes("vertical = $3")).toBe(true);
-    expect(filter.where_clause.includes("locale = $4")).toBe(true);
+    expect(filter.where_clause.includes("metadata ->> 'vertical' = $3")).toBe(true);
+    expect(filter.where_clause.includes("metadata ->> 'locale' = $4")).toBe(true);
     expect(filter.params).toEqual(["clinic_a", true, "dental", "en"]);
   });
 
@@ -58,12 +59,31 @@ describe("build_tenant_filter", () => {
 });
 
 describe("build_retrieval_query", () => {
-  it("orders by cosine distance and caps at the retrieve limit", () => {
-    const query = build_retrieval_query({ tenant_id: "clinic_a" });
-    expect(query.text.includes("embedding <=> $1::vector")).toBe(true);
-    expect(query.text.includes(`LIMIT ${RETRIEVE_TOP_K}`)).toBe(true);
-    expect(query.text.includes("tenant_id = $2")).toBe(true);
-    expect(query.text.includes("clinic_a")).toBe(false);
+  it("binds the serialized embedding first and uses the canonical table", () => {
+    const query = build_retrieval_query({
+      tenant_id: "clinic_a",
+      embedding_value: [0.1, 0.2],
+      scope: { vertical: "dental", locale: "en" },
+    });
+
+    expect(query.text).toContain("embedding <=> $1::vector");
+    expect(query.text).toContain("FROM knowledge_chunks");
+    expect(query.text).toContain(`LIMIT ${RETRIEVE_TOP_K}`);
+    expect(query.text).toContain("tenant_id = $2");
+    expect(query.text).not.toContain("rag_chunks");
+    expect(query.values).toEqual(["[0.1,0.2]", "clinic_a", true, "dental", "en"]);
+  });
+
+  it("rejects an invalid candidate limit", () => {
+    expect(() =>
+      build_retrieval_query({ tenant_id: "clinic_a", embedding_value: "[]", candidate_limit: 0 }),
+    ).toThrow(InvalidRetrievalQueryError);
+  });
+
+  it.each([" ", [Number.NaN]])("rejects an invalid embedding value", (embedding_value) => {
+    expect(() => build_retrieval_query({ tenant_id: "clinic_a", embedding_value })).toThrow(
+      InvalidRetrievalQueryError,
+    );
   });
 });
 
@@ -92,6 +112,16 @@ describe("sort_by_policy_precedence", () => {
       { chunk: new_chunk, similarity: 0.8 },
     ]);
     expect(ordered[0]?.chunk.chunk_id).toBe(new_chunk.chunk_id);
+  });
+  it("uses higher similarity as the final deterministic tie-breaker", () => {
+    const lower_similarity = build_test_chunk({ chunk_id: "sop_reschedule_v3:chunk_0001" });
+    const higher_similarity = build_test_chunk({ chunk_id: "sop_reschedule_v3:chunk_0002" });
+    const ordered = sort_by_policy_precedence([
+      { chunk: lower_similarity, similarity: 0.7 },
+      { chunk: higher_similarity, similarity: 0.8 },
+    ]);
+
+    expect(ordered[0]?.chunk.chunk_id).toBe(higher_similarity.chunk_id);
   });
 });
 
@@ -139,7 +169,7 @@ describe("retrieval audit safety", () => {
       { chunk: build_test_chunk(), similarity: 0.9 },
     ]);
     const entry = build_retrieval_audit_entry({
-      embedding_model: "nomic-embed-text",
+      embedding_model: "text-embedding-3-small",
       embedding_version: "v1",
       outcome,
       request_id: "req_123",
