@@ -15,6 +15,7 @@
     "@repo/slot-broker": "workspace:*",
     "@repo/slot-engine": "workspace:*",
     "@repo/mcp-gcal": "workspace:*",
+    "@repo/wa-sender": "workspace:*",
     "@langchain/langgraph": "^0.2.0",
     "@repo/voice-intent": "workspace:*",
     "dotenv": "^16.4.5",
@@ -22,6 +23,8 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.2",
+    "@types/pg": "^8.15.5",
+    "pg": "^8.16.3",
     "tsx": "^4.16.0",
     "typescript": "^5.5.0",
     "vitest": "^2.1.0"

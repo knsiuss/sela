@@ -40,13 +40,12 @@ async function query_count(
 
 /** Treat a driver-reported unique conflict as a duplicate claim. */
 function is_unique_violation(error: unknown): boolean {
-  if (!(error instanceof DedupeStoreError)) return false;
-  const cause = (error as Error & { cause?: unknown }).cause;
-  return (
-    typeof cause === "object" &&
-    cause !== null &&
-    (cause as { code?: unknown }).code === "23505"
-  );
+  let current: unknown = error;
+  for (let depth = 0; depth < 3 && current !== undefined && current !== null; depth += 1) {
+    if (typeof current === "object" && (current as { code?: unknown }).code === "23505") return true;
+    current = current instanceof Error ? (current as Error & { cause?: unknown }).cause : undefined;
+  }
+  return false;
 }
 
 /** Postgres claim store backed by the unique `processed_messages.wamid` key. */

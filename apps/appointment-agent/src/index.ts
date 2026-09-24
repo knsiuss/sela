@@ -3,24 +3,22 @@ import { InMemoryTenantAvailabilityProvider, SlotBroker } from "@repo/slot-broke
 import { SlotService } from "@repo/slot-engine";
 import { build_graph } from "./graph.js";
 import { cross_tenant_search_node, is_cross_tenant_search_message } from "./cross_tenant_search.js";
-import { InMemoryMessageDedupe } from "./ingress/dedupe.js";
-import { InMemoryWebhookQueue } from "./webhook_handler.js";
-import { load_server_config, start_http_server } from "./http/server.js";
 import { handle_voice_note } from "./voice_note_flow.js";
 import type { TimeSlot } from "./state.js";
 import { SlotServiceAdapter } from "./tools/slot_service_adapter.js";
+import { start_all, start_worker_only, stop_all } from "./composition.js";
 
 const DEFAULT_TENANT_ID = "default-tenant";
 const DEFAULT_CROSS_TENANT_VERTICAL = "clinic";
 const DEFAULT_CROSS_TENANT_LOCALE = "id-ID";
 const CROSS_TENANT_SEARCH_WINDOW_DAYS = 7;
 const MILLISECONDS_PER_DAY = 86_400_000;
-type AppMode = "cli" | "server";
+type AppMode = "cli" | "server" | "worker";
 
 function resolve_app_mode(env: Record<string, string | undefined>): AppMode {
   const mode = env["APP_MODE"] ?? "cli";
-  if (mode !== "cli" && mode !== "server") {
-    throw new Error("APP_MODE must be server or cli");
+  if (mode !== "cli" && mode !== "server" && mode !== "worker") {
+    throw new Error("APP_MODE must be server, worker, or cli");
   }
   return mode;
 }
@@ -45,20 +43,13 @@ function make_default_slots(): TimeSlot[] {
 }
 
 async function run_server(): Promise<void> {
-  const config = load_server_config();
-  const server = await start_http_server(config, {
-    dedupe_store: new InMemoryMessageDedupe(),
-    job_queue: new InMemoryWebhookQueue(),
-  });
-  console.info(
-    JSON.stringify({
-      event: "webhook_server_started",
-      host: config.host,
-      port: config.port,
-    }),
-  );
-  // Keep the reference explicit; the listening server owns the process lifetime.
-  void server;
+  await start_all();
+  console.info(JSON.stringify({ event: "webhook_server_and_worker_started" }));
+}
+
+async function run_worker(): Promise<void> {
+  await start_worker_only();
+  console.info(JSON.stringify({ event: "webhook_worker_started" }));
 }
 
 async function run_cli(
@@ -112,11 +103,13 @@ async function run_cli(
   const result = await app.invoke({
     conversation_id: `cli-${Date.now()}`,
     raw_message: message,
+    button_id: undefined,
     intent: "unknown",
     confidence: 0,
     candidate_slots: [],
     chosen_slot_id: undefined,
     hold: undefined,
+    customer_confirmed: false,
     needs_human: false,
     human_summary: undefined,
     done: false,
@@ -125,8 +118,19 @@ async function run_cli(
 }
 
 const app_mode = resolve_app_mode(process.env);
-if (app_mode === "server") {
-  await run_server();
+if (app_mode === "server" || app_mode === "worker") {
+  const shutdown = (): void => {
+    void stop_all().catch((error: unknown) => {
+      console.error(JSON.stringify({
+        event: "shutdown_failed",
+        error_name: error instanceof Error ? error.name : "UnknownError",
+      }));
+    });
+  };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
+  if (app_mode === "server") await run_server();
+  else await run_worker();
 } else {
   await run_cli(process.argv.slice(2), process.env);
 }

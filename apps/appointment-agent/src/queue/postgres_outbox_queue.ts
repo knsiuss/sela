@@ -8,6 +8,11 @@ const INSERT_JOB_SQL = `
   VALUES ($1, $2, $3, $4)
   ON CONFLICT (wamid) DO NOTHING
 `;
+const INSERT_TENANT_JOB_SQL = `
+  INSERT INTO webhook_jobs (tenant_id, request_id, wamid, conversation_id, received_at_iso)
+  VALUES ($1, $2, $3, $4, $5)
+  ON CONFLICT (wamid) DO NOTHING
+`;
 const MAX_ID_LENGTH = 128;
 
 /** Raised when a job is invalid before it reaches the database boundary. */
@@ -41,7 +46,8 @@ function assert_valid_job(job: QueuedWebhookJob): void {
     !is_non_empty_id(job.wamid) ||
     !is_non_empty_id(job.conversation_id) ||
     typeof job.received_at_iso !== "string" ||
-    !Number.isFinite(Date.parse(job.received_at_iso))
+    !Number.isFinite(Date.parse(job.received_at_iso)) ||
+    (job.tenant_id !== undefined && !is_non_empty_id(job.tenant_id))
   ) {
     throw new InvalidWebhookJobError();
   }
@@ -81,12 +87,22 @@ export class PostgresWebhookJobQueue implements WebhookJobQueue {
       throw new WebhookJobQueueError();
     }
     try {
-      await sql_client.query(INSERT_JOB_SQL, [
-        job.request_id,
-        job.wamid,
-        job.conversation_id,
-        job.received_at_iso,
-      ]);
+      if (job.tenant_id === undefined) {
+        await sql_client.query(INSERT_JOB_SQL, [
+          job.request_id,
+          job.wamid,
+          job.conversation_id,
+          job.received_at_iso,
+        ]);
+      } else {
+        await sql_client.query(INSERT_TENANT_JOB_SQL, [
+          job.tenant_id,
+          job.request_id,
+          job.wamid,
+          job.conversation_id,
+          job.received_at_iso,
+        ]);
+      }
     } catch (error) {
       throw new WebhookJobQueueError(error);
     }

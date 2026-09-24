@@ -42,10 +42,17 @@ function hold_chosen_slot(calendar: CalendarPort) {
   };
 }
 
-// Human-in-the-loop: an irreversible write pauses here until staff approves.
+// Staff approval is a separate, checkpointed path; customer confirmation alone never writes.
 async function confirm_write(
   state: AppointmentStateType,
 ): Promise<Partial<AppointmentStateType>> {
+  if (!state.hold) return { done: true };
+  if (state.customer_confirmed !== true) {
+    return {
+      done: true,
+      human_summary: "Waiting for explicit customer confirmation.",
+    };
+  }
   const approval = interrupt<unknown, { approved: boolean; note?: string }>({
     question: "Approve calendar write?",
     slot_id: state.chosen_slot_id,
@@ -59,7 +66,7 @@ async function confirm_write(
 
 function write_calendar(calendar: CalendarPort) {
   return async (state: AppointmentStateType): Promise<Partial<AppointmentStateType>> => {
-    if (!state.hold) return { done: true };
+    if (!state.hold || state.done || state.customer_confirmed !== true) return { done: true };
     await calendar.confirm_hold(state.hold.hold_id, `${state.conversation_id}:${state.hold.hold_id}`);
     return { done: true };
   };
@@ -75,15 +82,15 @@ export function build_graph(calendar: CalendarPort) {
   const graph = new StateGraph(AppointmentState)
     .addNode("parse", parse_message)
     .addNode("offer", offer_slots(calendar))
-    .addNode("hold", hold_chosen_slot(calendar))
+    .addNode("hold_slot", hold_chosen_slot(calendar))
     .addNode("confirm", confirm_write)
     .addNode("write", write_calendar(calendar))
     .addEdge(START, "parse")
     .addConditionalEdges("parse", (state) =>
       state.needs_human || state.intent === "confirm" || state.intent === "cancel" ? END : "offer",
     )
-    .addEdge("offer", "hold")
-    .addEdge("hold", "confirm")
+    .addEdge("offer", "hold_slot")
+    .addEdge("hold_slot", "confirm")
     .addEdge("confirm", "write")
     .addEdge("write", END);
   return graph.compile();

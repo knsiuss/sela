@@ -9,11 +9,13 @@ function base_state(overrides: Partial<AppointmentStateType> = {}): AppointmentS
   return {
     conversation_id: "test-1",
     raw_message: "",
+    button_id: undefined,
     intent: "unknown",
     confidence: 0,
     candidate_slots: [],
     chosen_slot_id: undefined,
     hold: undefined,
+    customer_confirmed: false,
     needs_human: false,
     human_summary: undefined,
     done: false,

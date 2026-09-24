@@ -7,4 +7,6 @@ export interface SqlQueryResult {
 /** Database boundary accepted by the Postgres adapters. */
 export interface SqlClient {
   query(sql: string, values?: readonly unknown[]): Promise<SqlQueryResult>;
+  /** Release pooled resources when the composition owns the client. */
+  close?(): Promise<void>;
 }

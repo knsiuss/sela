@@ -5,6 +5,9 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { MessageDedupeStore } from "../ingress/dedupe.js";
+import type { InboundMessageStore } from "../ingress/inbound_store.js";
+import type { TenantResolver } from "../ingress/tenant_resolver.js";
+import type { RecipientCipher } from "../security/recipient_cipher.js";
 import {
   is_valid_signature,
 } from "../ingress/verify.js";
@@ -52,6 +55,10 @@ export interface HttpServerConfig {
 export interface HttpServerDependencies {
   dedupe_store: MessageDedupeStore;
   job_queue: WebhookJobQueue;
+  tenant_resolver?: TenantResolver;
+  inbound_store?: InboundMessageStore;
+  recipient_cipher?: RecipientCipher;
+  inbound_retention_days?: number;
   inbound_handler?: typeof handle_inbound_request;
 }
 
@@ -146,6 +153,12 @@ async function webhook_response(
     config.app_secret,
     dependencies.dedupe_store,
     dependencies.job_queue,
+    {
+      tenant_resolver: dependencies.tenant_resolver,
+      inbound_store: dependencies.inbound_store,
+      recipient_cipher: dependencies.recipient_cipher,
+      retention_days: dependencies.inbound_retention_days,
+    },
   );
   return json_response(HTTP_STATUS.OK, result);
 }

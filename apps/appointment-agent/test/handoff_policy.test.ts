@@ -7,11 +7,13 @@ function state_with(message: string, overrides: Partial<AppointmentStateType> = 
   return {
     conversation_id: "conv-1",
     raw_message: message,
+    button_id: undefined,
     intent: "unknown",
     confidence: 0,
     candidate_slots: [],
     chosen_slot_id: undefined,
     hold: undefined,
+    customer_confirmed: false,
     needs_human: false,
     human_summary: undefined,
     done: false,

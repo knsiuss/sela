@@ -1,6 +1,9 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryMessageDedupe } from "../src/ingress/dedupe.js";
+import { InMemoryInboundMessageStore } from "../src/ingress/inbound_store.js";
+import { InMemoryTenantResolver } from "../src/ingress/tenant_resolver.js";
+import { AesGcmRecipientCipher, RecipientCipherError } from "../src/security/recipient_cipher.js";
 import {
   InMemoryWebhookQueue,
   WebhookQueueError,
@@ -10,6 +13,7 @@ import {
 } from "../src/webhook_handler.js";
 
 const APP_SECRET = "handler-test-secret";
+const RECIPIENT_CIPHER = new AesGcmRecipientCipher(Buffer.alloc(32, 5));
 const RAW_BODY = JSON.stringify({
   object: "whatsapp_business_account",
   entry: [
@@ -17,6 +21,7 @@ const RAW_BODY = JSON.stringify({
       changes: [
         {
           value: {
+            phone_number_id: "phone-handler-test",
             messages: [
               {
                 id: "wamid.handler-regression",
@@ -48,14 +53,90 @@ function sign(body: string): string {
   return `sha256=${createHmac("sha256", APP_SECRET).update(body).digest("hex")}`;
 }
 
+function ingress_options() {
+  return { tenant_resolver: new InMemoryTenantResolver({ "phone-handler-test": "42" }) };
+}
+
 describe("handle_inbound_request", () => {
+  it("fails closed when no tenant resolver is configured", async () => {
+    const store = new InMemoryMessageDedupe();
+    const queue = new InMemoryWebhookQueue();
+
+    const result = await handle_inbound_request(
+      RAW_BODY,
+      sign(RAW_BODY),
+      APP_SECRET,
+      store,
+      queue,
+    );
+
+    expect(result).toMatchObject({ enqueued_count: 0, unresolved_count: 1 });
+    expect(queue.pending_jobs()).toHaveLength(0);
+  });
+
+  it("encrypts the reply target before retention and keeps it out of jobs and audit logs", async () => {
+    const dedupe_store = new InMemoryMessageDedupe();
+    const inbound_store = new InMemoryInboundMessageStore();
+    const queue = new InMemoryWebhookQueue();
+    const audit_spy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+
+    try {
+      const result = await handle_inbound_request(
+        RAW_BODY,
+        sign(RAW_BODY),
+        APP_SECRET,
+        dedupe_store,
+        queue,
+        {
+          ...ingress_options(),
+          inbound_store,
+          recipient_cipher: RECIPIENT_CIPHER,
+        },
+      );
+      const row = inbound_store.all()[0];
+      const ciphertext = row?.reply_target_ciphertext;
+
+      expect(result.enqueued_count).toBe(1);
+      expect(ciphertext).toMatch(/^v1\./);
+      expect(RECIPIENT_CIPHER.decrypt(ciphertext!)).toBe("+15551234567");
+      expect(JSON.stringify(row)).not.toContain("+15551234567");
+      expect(JSON.stringify(queue.pending_jobs())).not.toContain("+15551234567");
+      expect(JSON.stringify(queue.pending_jobs())).not.toContain(ciphertext!);
+      const audit_output = audit_spy.mock.calls.map((args) => JSON.stringify(args)).join("\n");
+      expect(audit_output).not.toContain("+15551234567");
+      expect(audit_output).not.toContain(ciphertext!);
+    } finally {
+      audit_spy.mockRestore();
+    }
+  });
+
+  it("fails before claiming when inbound persistence has no recipient cipher", async () => {
+    const dedupe_store = new InMemoryMessageDedupe();
+    const inbound_store = new InMemoryInboundMessageStore();
+    const queue = new InMemoryWebhookQueue();
+
+    await expect(
+      handle_inbound_request(
+        RAW_BODY,
+        sign(RAW_BODY),
+        APP_SECRET,
+        dedupe_store,
+        queue,
+        { ...ingress_options(), inbound_store },
+      ),
+    ).rejects.toBeInstanceOf(RecipientCipherError);
+    expect(await dedupe_store.has_seen("wamid.handler-regression")).toBe(false);
+    expect(queue.pending_jobs()).toHaveLength(0);
+    expect(inbound_store.all()).toHaveLength(0);
+  });
+
   it("releases a claim when enqueue fails so a retry can be processed", async () => {
     const store = new InMemoryMessageDedupe();
     const release_claim = vi.spyOn(store, "release_claim");
     const queue = new FlakyWebhookQueue();
 
     await expect(
-      handle_inbound_request(RAW_BODY, sign(RAW_BODY), APP_SECRET, store, queue),
+      handle_inbound_request(RAW_BODY, sign(RAW_BODY), APP_SECRET, store, queue, ingress_options()),
     ).rejects.toThrow(WebhookQueueError);
     expect(release_claim).toHaveBeenCalledWith("wamid.handler-regression");
     expect(await store.has_seen("wamid.handler-regression")).toBe(false);
@@ -66,6 +147,7 @@ describe("handle_inbound_request", () => {
       APP_SECRET,
       store,
       queue,
+      ingress_options(),
     );
 
     expect(result.enqueued_count).toBe(1);
@@ -82,6 +164,7 @@ describe("handle_inbound_request", () => {
       APP_SECRET,
       store,
       queue,
+      ingress_options(),
     );
     const second = await handle_inbound_request(
       RAW_BODY,
@@ -89,6 +172,7 @@ describe("handle_inbound_request", () => {
       APP_SECRET,
       store,
       queue,
+      ingress_options(),
     );
 
     expect(first.enqueued_count).toBe(1);

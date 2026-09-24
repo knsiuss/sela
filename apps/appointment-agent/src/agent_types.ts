@@ -45,7 +45,7 @@ export type QuickReplyButton = z.infer<typeof quick_reply_button_schema>;
 /** At least one and at most three buttons per message (Meta quick-reply cap). */
 export const button_set_schema = z.array(quick_reply_button_schema).min(1).max(MAX_BUTTONS_PER_MESSAGE);
 
-/** Single inbound user message after webhook extraction, before queueing. */
+/** Single inbound webhook message after signature and channel parsing. */
 export const inbound_message_schema = z.object({
   wamid: z.string().min(1).max(128),
   sender_phone_e164: z.string().regex(/^\+[1-9]\d{7,14}$/, "sender must be E.164"),
@@ -56,6 +56,18 @@ export const inbound_message_schema = z.object({
 });
 
 export type InboundMessage = z.infer<typeof inbound_message_schema>;
+
+/** Retained worker message; it carries an opaque sender reference, not a phone. */
+export const retained_inbound_message_schema = z.object({
+  wamid: z.string().min(1).max(128),
+  sender_ref: z.string().min(1).max(256),
+  text_body: z.string().min(1).max(MAX_FREE_TEXT_CHARS),
+  message_kind: z.enum(["text", "button_reply"]),
+  button_id: z.string().min(1).max(64).optional(),
+  sent_at_iso: z.string().min(1),
+});
+
+export type RetainedInboundMessage = z.infer<typeof retained_inbound_message_schema>;
 
 /** Booking hold lifecycle: free -> held -> confirmed, with expiry as the only exit from held. */
 export const confirm_state_schema = z.enum(["free", "held", "confirmed", "expired"]);

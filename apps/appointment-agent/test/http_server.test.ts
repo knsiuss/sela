@@ -3,6 +3,9 @@ import { request as http_request, type RequestOptions } from "node:http";
 import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 import { InMemoryMessageDedupe } from "../src/ingress/dedupe.js";
+import { InMemoryInboundMessageStore } from "../src/ingress/inbound_store.js";
+import { InMemoryTenantResolver } from "../src/ingress/tenant_resolver.js";
+import { AesGcmRecipientCipher } from "../src/security/recipient_cipher.js";
 import {
   create_http_server,
   load_server_config,
@@ -14,6 +17,7 @@ import { InMemoryWebhookQueue, MAX_WEBHOOK_BYTES } from "../src/webhook_handler.
 
 const VERIFY_TOKEN = "verify-token-test";
 const APP_SECRET = "app-secret-test";
+const RECIPIENT_CIPHER = new AesGcmRecipientCipher(Buffer.alloc(32, 6));
 const CONFIG: HttpServerConfig = {
   port: 0,
   host: "127.0.0.1",
@@ -27,6 +31,7 @@ const VALID_BODY = JSON.stringify({
       changes: [
         {
           value: {
+            phone_number_id: "phone-http-test",
             messages: [
               {
                 id: "wamid.http-test",
@@ -101,6 +106,9 @@ async function make_request(
 function dependencies(): HttpServerDependencies {
   return {
     dedupe_store: new InMemoryMessageDedupe(),
+    inbound_store: new InMemoryInboundMessageStore(),
+    recipient_cipher: RECIPIENT_CIPHER,
+    tenant_resolver: new InMemoryTenantResolver({ "phone-http-test": "42" }),
     job_queue: new InMemoryWebhookQueue(),
   };
 }
@@ -144,7 +152,8 @@ describe("http webhook server", () => {
 
   it("accepts a signed payload and rejects a tampered payload", async () => {
     const queue = new InMemoryWebhookQueue();
-    const server_dependencies = { ...dependencies(), job_queue: queue };
+    const inbound_store = new InMemoryInboundMessageStore();
+    const server_dependencies = { ...dependencies(), inbound_store, job_queue: queue };
     await with_server(server_dependencies, async (base_url) => {
       const valid = await make_request(base_url, "/webhooks/whatsapp", {
         method: "POST",
@@ -158,6 +167,14 @@ describe("http webhook server", () => {
         enqueued_count: 1,
       });
       expect(queue.pending_jobs()).toHaveLength(1);
+      expect(queue.pending_jobs()[0]).toMatchObject({ tenant_id: "42" });
+      expect(inbound_store.all()).toHaveLength(1);
+      expect(inbound_store.all()[0]).toMatchObject({
+        tenant_id: "42",
+        wamid: "wamid.http-test",
+        reply_target_ciphertext: expect.stringMatching(/^v1\./),
+      });
+      expect(JSON.stringify(inbound_store.all())).not.toContain("+15551234567");
 
       const tampered = await make_request(base_url, "/webhooks/whatsapp", {
         method: "POST",
@@ -166,6 +183,27 @@ describe("http webhook server", () => {
       });
       expect(tampered.status).toBe(401);
       expect(queue.pending_jobs()).toHaveLength(1);
+      expect(queue.pending_jobs()[0]).toMatchObject({ tenant_id: "42" });
+    });
+  });
+
+  it("returns 200 and skips an unknown channel without creating a job", async () => {
+    const queue = new InMemoryWebhookQueue();
+    const unknown_body = VALID_BODY.replace("phone-http-test", "phone-unknown");
+    await with_server({ ...dependencies(), job_queue: queue }, async (base_url) => {
+      const response = await make_request(base_url, "/webhooks/whatsapp", {
+        method: "POST",
+        headers: { "x-hub-signature-256": signature_for(unknown_body) },
+        body: unknown_body,
+      });
+
+      expect(response.status).toBe(200);
+      expect(JSON.parse(response.body)).toMatchObject({
+        received_count: 1,
+        enqueued_count: 0,
+        unresolved_count: 1,
+      });
+      expect(queue.pending_jobs()).toHaveLength(0);
     });
   });
 

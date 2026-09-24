@@ -1,5 +1,8 @@
 import type { ServerResponse } from "node:http";
 import { DedupeStoreError } from "../ingress/dedupe.js";
+import { InboundMessageStoreError } from "../ingress/inbound_store.js";
+import { TenantResolverError } from "../ingress/tenant_resolver.js";
+import { RecipientCipherError } from "../security/recipient_cipher.js";
 import {
   MissingChallengeError,
   MissingVerifyTokenError,
@@ -79,7 +82,13 @@ export function error_response(error: unknown): HttpResponse {
   if (error instanceof InvalidWebhookPayloadError || error instanceof RequestReadError) {
     return json_response(HTTP_STATUS.BAD_REQUEST, { error: "invalid_webhook_payload" });
   }
-  if (error instanceof WebhookQueueError || error instanceof DedupeStoreError) {
+  if (
+    error instanceof WebhookQueueError ||
+    error instanceof DedupeStoreError ||
+    error instanceof InboundMessageStoreError ||
+    error instanceof TenantResolverError ||
+    error instanceof RecipientCipherError
+  ) {
     return json_response(HTTP_STATUS.SERVICE_UNAVAILABLE, { error: "webhook_temporarily_unavailable" });
   }
   if (error instanceof RequestDeadlineError) {

@@ -11,6 +11,7 @@ const JOB = {
   wamid: "wamid.queue-test",
   conversation_id: "conversation-test",
   received_at_iso: "2026-09-24T00:00:00.000Z",
+  tenant_id: "42",
 };
 
 describe("postgres_webhook_job_queue", () => {
@@ -23,7 +24,7 @@ describe("postgres_webhook_job_queue", () => {
 
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining("INSERT INTO webhook_jobs"),
-      [JOB.request_id, JOB.wamid, JOB.conversation_id, JOB.received_at_iso],
+      [JOB.tenant_id, JOB.request_id, JOB.wamid, JOB.conversation_id, JOB.received_at_iso],
     );
     expect(query.mock.calls[0]?.[0]).toContain("ON CONFLICT (wamid) DO NOTHING");
   });
