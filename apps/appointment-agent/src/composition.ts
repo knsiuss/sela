@@ -48,7 +48,10 @@ import {
   type WorkerLoopCounters,
 } from "./worker/loop.js";
 import { build_runtime_sender, resolve_runtime_tenant_id } from "./outbound/runtime_sender.js";
-import { SingleTenantOutboundSenderRegistry } from "./outbound/sender_registry.js";
+import {
+  is_multi_tenant_sender_registry,
+  SingleTenantOutboundSenderRegistry,
+} from "./outbound/sender_registry.js";
 import {
   AesGcmRecipientCipher,
   EphemeralRecipientCipher,
@@ -351,7 +354,8 @@ function resolve_worker_tenant_scope(
   if (options.sender_registry === undefined || (configured_tenant_id !== undefined && configured_tenant_id !== "")) {
     return resolve_runtime_tenant_id(env, is_database_backed);
   }
-  return undefined;
+  if (is_multi_tenant_sender_registry(options.sender_registry)) return undefined;
+  throw new CompositionConfigurationError("multi-tenant-registry-required");
 }
 
 function make_in_memory_resolver(env: Record<string, string | undefined>): InMemoryTenantResolver {

@@ -206,6 +206,18 @@ describe("postgres atomic ingress store", () => {
     expect(harness.calls).toHaveLength(2);
   });
 
+  it("accepts a duplicate when a terminal job survives inbound retention cleanup", async () => {
+    const harness = make_harness((sql, values) => {
+      if (sql.includes("INSERT INTO processed_messages")) return { rows: [], rowCount: 0 };
+      if (sql.includes("FROM processed_messages AS pm")) return { rows: [{ tenant_id: values?.[0], wamid: values?.[1] }], rowCount: 1 };
+      throw new Error("unexpected SQL");
+    });
+    const store = new PostgresAtomicIngressStore(harness.client);
+
+    await expect(store.accept(input())).resolves.toMatchObject({ status: "duplicate" });
+    expect(harness.calls[1]?.sql).toContain("im.id IS NOT NULL OR wj.status IN ('completed', 'failed')");
+  });
+
   it("rolls back when the claim write fails", async () => {
     const harness = make_harness((sql) => {
       if (sql.includes("INSERT INTO processed_messages")) throw new Error("claim failure");

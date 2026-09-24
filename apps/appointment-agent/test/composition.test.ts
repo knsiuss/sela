@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { build_composition, CompositionConfigurationError } from "../src/composition.js";
 import { PostgresRescheduleSessionStore } from "../src/reschedule/postgres_session_store.js";
 import { InMemoryRescheduleSessionStore } from "../src/reschedule/session_store.js";
+import { mark_multi_tenant_sender_registry } from "../src/outbound/sender_registry.js";
 import type { OutboundSenderPort, OutboundSenderRegistry } from "../src/worker/loop.js";
 
 describe("composition", () => {
@@ -82,8 +83,10 @@ describe("composition", () => {
     await composition.stop();
   });
 
-  it("accepts an injected sender registry for database-backed deployment wiring", async () => {
-    const sender_registry = { send: vi.fn(async () => ({ status: "sent" })) };
+  it("accepts an explicitly declared multi-tenant sender registry", async () => {
+    const sender_registry = mark_multi_tenant_sender_registry({
+      send: vi.fn(async () => ({ status: "sent" })),
+    });
     const composition = build_composition({
       env: {
         DATABASE_URL: "postgres://test.invalid/app",
@@ -95,6 +98,16 @@ describe("composition", () => {
     expect(composition.sender_registry).toBe(sender_registry);
     expect(composition.worker_tenant_id).toBeUndefined();
     await composition.stop();
+  });
+
+  it("rejects an unmarked global registry when no tenant binding is configured", () => {
+    expect(() => build_composition({
+      env: {
+        DATABASE_URL: "postgres://test.invalid/app",
+        WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64: Buffer.alloc(32, 4).toString("base64"),
+      },
+      sender_registry: { send: async () => undefined },
+    })).toThrow("multi-tenant-registry-required");
   });
 
   it("rejects conflicting legacy sender and registry injections", () => {

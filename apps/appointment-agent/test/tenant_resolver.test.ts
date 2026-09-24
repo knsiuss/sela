@@ -25,6 +25,15 @@ describe("tenant resolver", () => {
     ]);
   });
 
+  it("forwards a request cancellation signal to the SQL lookup", async () => {
+    const query = vi.fn(async () => ({ rows: [{ tenant_id: 42 }] }));
+    const resolver = new SqlTenantResolver({ query } satisfies SqlClient);
+    const controller = new AbortController();
+
+    await expect(resolver.resolve("phone-signal", "whatsapp", controller.signal)).resolves.toBe("42");
+    expect(query).toHaveBeenCalledWith(expect.any(String), ["whatsapp", "phone-signal"], controller.signal);
+  });
+
   it("translates database failures without exposing the account id", async () => {
     const query = vi.fn(async () => {
       throw new Error("connection details for phone-private");

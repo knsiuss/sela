@@ -64,11 +64,13 @@ const CLAIM_MESSAGE_SQL = `
 const VERIFY_COMPLETE_CLAIM_SQL = `
   SELECT pm.tenant_id, pm.wamid
   FROM processed_messages AS pm
-  INNER JOIN inbound_messages AS im
+  LEFT JOIN inbound_messages AS im
     ON im.tenant_id = pm.tenant_id AND im.wamid = pm.wamid
   INNER JOIN webhook_jobs AS wj
     ON wj.tenant_id = pm.tenant_id AND wj.wamid = pm.wamid
-  WHERE pm.tenant_id = $1 AND pm.wamid = $2
+  WHERE pm.tenant_id = $1
+    AND pm.wamid = $2
+    AND (im.id IS NOT NULL OR wj.status IN ('completed', 'failed'))
   LIMIT 1
 `;
 

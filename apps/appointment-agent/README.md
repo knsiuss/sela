@@ -120,11 +120,12 @@ and worker, while `APP_MODE=worker` starts only the worker. `SIGTERM` and
 The default database composition also scopes the worker claimer to `TENANT_ID`;
 it cannot claim another tenant's jobs. A composition using an injected
 multi-tenant `OutboundSenderRegistry` may omit `TENANT_ID` and use the global
-claimer, but that registry is an explicit deployment contract and must cover
-every tenant that can enqueue work. An existing dedupe claim without both its
-inbound row and worker job fails closed as an orphan for operator reconciliation.
-The HTTP ACK deadline aborts an in-flight atomic transaction and destroys its
-dedicated connection.
+claimer only when it is marked with `mark_multi_tenant_sender_registry` and
+explicitly covers every tenant that can enqueue work. An existing dedupe claim without a complete
+worker job or active inbound row fails closed as an orphan for operator
+reconciliation; terminal jobs may remain valid after inbound retention cleanup.
+The HTTP ACK deadline aborts in-flight tenant resolution and atomic transaction
+work, releasing or destroying the dedicated database connection.
 
 Every Meta `phone_number_id` must have a row in `tenant_channels`:
 

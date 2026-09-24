@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { build_composition } from "../src/composition.js";
+import { mark_multi_tenant_sender_registry } from "../src/outbound/sender_registry.js";
 import { build_inbound_message_record } from "../src/ingress/inbound_store.js";
 import type { OutboundDraft } from "../src/worker/process_job.js";
 
@@ -26,12 +27,12 @@ describe("composition tenant sender routing", () => {
         WORKER_POLL_INTERVAL_MS: "5",
         WORKER_BATCH_SIZE: "2",
       },
-      sender_registry: {
+      sender_registry: mark_multi_tenant_sender_registry({
         send: async (tenant_id, draft) => {
           sends.push({ tenant_id, draft });
           return { status: "sent" };
         },
-      },
+      }),
     });
 
     try {

@@ -334,7 +334,7 @@ export async function handle_inbound_request(
   let unresolved_count = 0;
 
   for (const { message, channel_account_id } of messages) {
-    const tenant_id = await resolve_tenant(options.tenant_resolver, channel_account_id);
+    const tenant_id = await resolve_tenant(options.tenant_resolver, channel_account_id, options.signal);
     if (tenant_id === null || tenant_id === undefined) {
       unresolved_count += 1;
       continue;
@@ -447,10 +447,11 @@ function normalize_request_options(
 async function resolve_tenant(
   resolver: TenantResolver | undefined,
   channel_account_id: string,
+  signal?: AbortSignal,
 ): Promise<string | null | undefined> {
   if (resolver === undefined) return undefined;
   if (channel_account_id === "") return null;
-  return resolver.resolve(channel_account_id, "whatsapp");
+  return resolver.resolve(channel_account_id, "whatsapp", signal);
 }
 
 async function release_claim(

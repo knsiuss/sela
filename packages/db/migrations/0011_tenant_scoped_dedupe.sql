@@ -76,11 +76,12 @@ BEGIN
       ON inbound.tenant_id = claim.tenant_id AND inbound.wamid = claim.wamid
     LEFT JOIN public.webhook_jobs AS job
       ON job.tenant_id = claim.tenant_id AND job.wamid = claim.wamid
-    WHERE inbound.id IS NULL OR job.id IS NULL;
+    WHERE job.id IS NULL
+       OR (job.status IN ('pending', 'claimed') AND inbound.id IS NULL);
 
     IF orphan_claim_count > 0 THEN
         RAISE EXCEPTION
-            'processed_messages contains % claim(s) without both an inbound row and a worker job; operator reconciliation is required before migration 0011. Claims were not deleted.',
+            'processed_messages contains % claim(s) without a complete worker job or active inbound row; operator reconciliation is required before migration 0011. Claims were not deleted.',
             orphan_claim_count
             USING
                 ERRCODE = 'P0001',

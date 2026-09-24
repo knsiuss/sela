@@ -7,7 +7,7 @@ export interface SqlQueryResult {
 
 /** SQL surface available inside one transaction on a dedicated connection. */
 export interface SqlTransactionClient {
-  query(sql: string, values?: readonly unknown[]): Promise<SqlQueryResult>;
+  query(sql: string, values?: readonly unknown[], signal?: AbortSignal): Promise<SqlQueryResult>;
 }
 
 /** Work executed against one transaction-scoped SQL client. */
@@ -15,7 +15,7 @@ export type SqlTransactionWork<T> = (transaction: SqlTransactionClient) => Promi
 
 /** Database boundary accepted by the Postgres adapters. */
 export interface SqlClient {
-  query(sql: string, values?: readonly unknown[]): Promise<SqlQueryResult>;
+  query(sql: string, values?: readonly unknown[], signal?: AbortSignal): Promise<SqlQueryResult>;
   /**
    * Run work on one dedicated transaction connection.
    *
@@ -31,5 +31,5 @@ export interface SqlClient {
 
 /** A SQL client that guarantees a transaction-scoped connection is available. */
 export interface TransactionalSqlClient extends SqlClient {
-  with_transaction<T>(work: SqlTransactionWork<T>): Promise<T>;
+  with_transaction<T>(work: SqlTransactionWork<T>, signal?: AbortSignal): Promise<T>;
 }

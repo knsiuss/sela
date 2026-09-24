@@ -100,6 +100,7 @@ export function load_pg_config(
 /** SQL client backed by a configured pg Pool. */
 export class PgSqlClient implements TransactionalSqlClient {
   private readonly pool: PgPoolLike;
+  private readonly statement_timeout_ms: number;
   private readonly transaction_timeout_ms: number;
   private is_closed = false;
 
@@ -110,7 +111,7 @@ export class PgSqlClient implements TransactionalSqlClient {
    * @throws PgClientError when no connection string or pool is supplied.
    */
   constructor(options: PgSqlClientOptions = {}) {
-    const statement_timeout_ms = positive_integer(
+    this.statement_timeout_ms = positive_integer(
       options.statement_timeout_ms ?? 10_000,
       "statement_timeout_ms",
     );
@@ -137,7 +138,7 @@ export class PgSqlClient implements TransactionalSqlClient {
     }
     this.pool = new Pool({
       connectionString: connection_string,
-      statement_timeout: statement_timeout_ms,
+      statement_timeout: this.statement_timeout_ms,
       connectionTimeoutMillis: connection_timeout_ms,
       application_name: application_name,
       max: max_pool_size,
@@ -152,10 +153,12 @@ export class PgSqlClient implements TransactionalSqlClient {
    * @returns Normalized pg rows and row count.
    * @throws PgClientError when the driver rejects the query.
    */
-  async query(sql: string, values?: readonly unknown[]): Promise<SqlQueryResult> {
+  async query(sql: string, values?: readonly unknown[], signal?: AbortSignal): Promise<SqlQueryResult> {
     if (this.is_closed) throw new PgClientError("postgres-client-closed");
     try {
-      const result = await this.pool.query(sql, values);
+      const result = signal === undefined
+        ? await this.pool.query(sql, values)
+        : await query_with_signal(this.pool, sql, values, signal, this.statement_timeout_ms);
       return { rows: result.rows, rowCount: result.rowCount };
     } catch (error) {
       throw new PgClientError("postgres-query-failed", error);
@@ -285,6 +288,36 @@ async function connect_with_signal(
         },
       );
   });
+}
+
+async function query_with_signal(
+  pool: PgPoolLike,
+  sql: string,
+  values: readonly unknown[] | undefined,
+  signal: AbortSignal,
+  timeout_ms: number,
+): Promise<{ rows: unknown[]; rowCount?: number | null }> {
+  const connect = pool.connect;
+  if (connect === undefined) throw new PgClientError("postgres-query-signal-unavailable");
+  const connection = await connect_with_signal(connect, pool, signal);
+  let should_destroy = false;
+  try {
+    const result = await run_bounded(
+      () => connection.query(sql, values),
+      timeout_ms,
+      () => {
+        should_destroy = true;
+      },
+      signal,
+    );
+    return { rows: result.rows, rowCount: result.rowCount };
+  } finally {
+    try {
+      connection.release(should_destroy || signal.aborted);
+    } catch (error) {
+      throw new PgClientError("postgres-query-release-failed", error);
+    }
+  }
 }
 
 type TransactionAttempt<T> =

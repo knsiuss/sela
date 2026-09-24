@@ -12,9 +12,14 @@ export interface TenantResolver {
    *
    * @param channel_account_id - Provider account id, such as Meta phone_number_id.
    * @param channel - Channel name; defaults to WhatsApp.
+   * @param signal - Optional request cancellation signal for database lookups.
    * @returns Tenant id, or null when the mapping is unknown.
    */
-  resolve(channel_account_id: string, channel?: string): Promise<TenantId | null>;
+  resolve(
+    channel_account_id: string,
+    channel?: string,
+    signal?: AbortSignal,
+  ): Promise<TenantId | null>;
 }
 
 /** Safe failure when the resolver database is unavailable. */
@@ -53,11 +58,17 @@ export class SqlTenantResolver implements TenantResolver {
    * @param channel - Channel name; defaults to WhatsApp.
    * @returns The mapped tenant id or null.
    */
-  async resolve(channel_account_id: string, channel = "whatsapp"): Promise<TenantId | null> {
+  async resolve(
+    channel_account_id: string,
+    channel = "whatsapp",
+    signal?: AbortSignal,
+  ): Promise<TenantId | null> {
     const account_id = require_account_id(channel_account_id);
     const channel_name = require_channel(channel);
     try {
-      const result = await this.sql_client.query(SELECT_TENANT_SQL, [channel_name, account_id]);
+      const result = signal === undefined
+        ? await this.sql_client.query(SELECT_TENANT_SQL, [channel_name, account_id])
+        : await this.sql_client.query(SELECT_TENANT_SQL, [channel_name, account_id], signal);
       return read_tenant_id(result);
     } catch (error) {
       if (error instanceof TenantResolverError) throw error;
@@ -114,7 +125,11 @@ export class InMemoryTenantResolver implements TenantResolver {
    * @param channel - Channel name; defaults to WhatsApp.
    * @returns The mapped tenant id or null.
    */
-  async resolve(channel_account_id: string, channel = "whatsapp"): Promise<TenantId | null> {
+  async resolve(
+    channel_account_id: string,
+    channel = "whatsapp",
+    _signal?: AbortSignal,
+  ): Promise<TenantId | null> {
     const account_id = require_account_id(channel_account_id);
     const channel_name = require_channel(channel);
     return this.mappings.get(mapping_key(channel_name, account_id)) ?? null;

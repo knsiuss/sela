@@ -280,6 +280,36 @@ describe("PgSqlClient", () => {
     expect(release).toHaveBeenCalledWith(true);
   });
 
+  it("cancels a signal-aware standalone query and destroys its connection", async () => {
+    const release = vi.fn();
+    const controller = new AbortController();
+    let query_started!: () => void;
+    const started = new Promise<void>((resolve) => {
+      query_started = resolve;
+    });
+    const pool: PgPoolLike = {
+      query: vi.fn(async () => ({ rows: [], rowCount: 0 })),
+      connect: vi.fn(async () => ({
+        query: vi.fn(async () => {
+          query_started();
+          return new Promise<never>(() => undefined);
+        }),
+        release,
+      })),
+      end: vi.fn(async () => undefined),
+    };
+    const client = new PgSqlClient({ pool, statement_timeout_ms: 1_000 });
+    const query = client.query("SELECT 1", [], controller.signal);
+    await started;
+    controller.abort();
+
+    await expect(query).rejects.toMatchObject({
+      name: "PgClientError",
+      message: "postgres-query-failed",
+    });
+    expect(release).toHaveBeenCalledWith(true);
+  });
+
   it("fails closed when the pool cannot provide a transaction connection", async () => {
     const client = new PgSqlClient({
       pool: {

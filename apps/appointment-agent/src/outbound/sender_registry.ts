@@ -8,6 +8,15 @@ import type { OutboundDraft } from "../worker/process_job.js";
 
 export type { OutboundSenderRegistry } from "../worker/loop.js";
 
+/** Runtime marker for an explicitly declared all-tenant sender registry. */
+export const MULTI_TENANT_SENDER_REGISTRY = Symbol("multi-tenant-sender-registry");
+
+/** Explicit deployment contract required before the worker may use the global claimer. */
+export interface MultiTenantOutboundSenderRegistry extends OutboundSenderRegistry {
+  readonly [MULTI_TENANT_SENDER_REGISTRY]: true;
+  readonly tenant_coverage: "all_tenants";
+}
+
 /** Sanitized failure when a tenant has no configured outbound sender. */
 export class OutboundSenderRegistryError extends Error {
   /** Stable code persisted by the worker without exposing tenant or provider data. */
@@ -52,6 +61,32 @@ export class SingleTenantOutboundSenderRegistry implements OutboundSenderRegistr
     }
     return this.sender.send(draft);
   }
+}
+
+/**
+ * Mark a registry as explicitly responsible for every tenant that can enqueue.
+ *
+ * The caller must verify coverage in deployment configuration; this function
+ * makes that trust boundary explicit instead of inferring it from `send`.
+ */
+export function mark_multi_tenant_sender_registry(
+  registry: OutboundSenderRegistry,
+): MultiTenantOutboundSenderRegistry {
+  const sender = require_registry(registry);
+  return Object.freeze({
+    [MULTI_TENANT_SENDER_REGISTRY]: true as const,
+    tenant_coverage: "all_tenants" as const,
+    send: (tenant_id: string, draft: OutboundDraft): Promise<unknown> => sender.send(tenant_id, draft),
+  });
+}
+
+/** Check the explicit all-tenant registry contract. */
+export function is_multi_tenant_sender_registry(value: unknown): value is MultiTenantOutboundSenderRegistry {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<MultiTenantOutboundSenderRegistry>;
+  return candidate[MULTI_TENANT_SENDER_REGISTRY] === true &&
+    candidate.tenant_coverage === "all_tenants" &&
+    typeof candidate.send === "function";
 }
 
 /** Map explicit tenant bindings to per-sender adapters without loading secrets. */
@@ -108,4 +143,11 @@ function require_sender(sender: OutboundSenderPort): OutboundSenderPort {
     throw new OutboundSenderRegistryError("registry-invalid");
   }
   return sender;
+}
+
+function require_registry(registry: OutboundSenderRegistry): OutboundSenderRegistry {
+  if (typeof registry?.send !== "function") {
+    throw new OutboundSenderRegistryError("registry-invalid");
+  }
+  return registry;
 }

@@ -16,7 +16,8 @@ describe("0011 tenant-scoped dedupe migration contract", () => {
     expect(migration_sql).toContain("WHERE tenant_id IS NULL");
     expect(migration_sql).toContain("LOCK TABLE public.processed_messages IN SHARE ROW EXCLUSIVE MODE");
     expect(migration_sql).toContain("operator reconciliation is required");
-    expect(migration_sql).toContain("without both an inbound row and a worker job");
+    expect(migration_sql).toContain("without a complete worker job or active inbound row");
+    expect(migration_sql).toContain("job.status IN ('pending', 'claimed') AND inbound.id IS NULL");
     expect(migration_sql).toContain("Claims were not deleted.");
     expect(migration_sql).toContain("ALTER COLUMN tenant_id SET NOT NULL");
     expect(migration_sql).toContain("PRIMARY KEY (tenant_id, wamid)");
