@@ -113,17 +113,25 @@ A checkbox may only be marked complete when the evidence column or linked artifa
 
 ## P0.3 Inbound reconciliation and orphan repair
 
-- [ ] Add a durable ingress status ledger or equivalent state machine.
-- [ ] Distinguish `accepted`, `duplicate`, `reconciling`, `needs_repair`, and `failed` states.
-- [ ] Detect claims without a complete active job.
-- [ ] Detect jobs without the required retained inbound row.
-- [ ] Detect rows left between external provider acceptance and local commit.
-- [ ] Provide an explicit repair/quarantine command; never delete claims automatically.
-- [ ] Record repair actor, reason, timestamp, and resulting state.
-- [ ] Alert when repair age exceeds the operational threshold.
-- [ ] Add a scheduled reconciliation job with bounded batches.
-- [ ] Add a dead-letter path for messages that cannot be repaired safely.
-- [ ] Define customer-support behavior for messages that require manual replay.
+> Implementation: `apps/appointment-agent/src/ingress/` (`reconciliation.ts`,
+> `reconciliation_store.ts`, `repair_audit.ts`, `reconciliation_runner.ts`), migration
+> `packages/db/migrations/0014_inbound_reconciliation.sql`, tests
+> `test/ingress_reconciliation*.test.ts` + `test/ingress_repair_audit.test.ts`.
+> Automated evidence: appointment-agent typecheck and unit suite green; 11
+> Postgres-integration tests skip without `TEST_DATABASE_URL`. A production-like
+> live-DB reconciliation run remains open.
+
+- [x] Add a durable ingress status ledger or equivalent state machine.
+- [x] Distinguish `accepted`, `duplicate`, `reconciling`, `needs_repair`, and `failed` states.
+- [x] Detect claims without a complete active job.
+- [x] Detect jobs without the required retained inbound row.
+- [x] Detect rows left between external provider acceptance and local commit.
+- [x] Provide an explicit repair/quarantine command; never delete claims automatically.
+- [x] Record repair actor, reason, timestamp, and resulting state.
+- [x] Alert when repair age exceeds the operational threshold.
+- [x] Add a scheduled reconciliation job with bounded batches.
+- [x] Add a dead-letter path for messages that cannot be repaired safely.
+- [x] Define customer-support behavior for messages that require manual replay.
 
 **Done evidence:** Reconciliation queries, repair runbook, alert, and a migration/integration fixture for active and terminal orphan cases.
 
