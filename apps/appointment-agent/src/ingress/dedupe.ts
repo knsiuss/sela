@@ -64,6 +64,25 @@ export class InMemoryMessageDedupe implements MessageDedupeStore {
     seen_ids.delete(wamid);
     if (seen_ids.size === 0) this.seen_by_tenant.delete(tenant_id);
   }
+
+  /**
+   * Forget every idempotency claim for one tenant during cascade erasure.
+   *
+   * Quarantine erasure must never call this; claims are the terminal
+   * idempotency evidence that retention cleanup always preserves.
+   *
+   * @param tenant_id - Tenant whose claims must be forgotten.
+   * @returns Number of claims removed.
+   * @throws InvalidTenantIdError for invalid input.
+   */
+  async evict_tenant(tenant_id: string): Promise<number> {
+    assert_valid_tenant_id(tenant_id);
+    const seen_ids = this.seen_by_tenant.get(tenant_id);
+    if (seen_ids === undefined) return 0;
+    const removed = seen_ids.size;
+    this.seen_by_tenant.delete(tenant_id);
+    return removed;
+  }
 }
 
 function assert_dedupe_identity(tenant_id: string, wamid: string): void {

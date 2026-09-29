@@ -194,6 +194,27 @@ export class InMemoryInboundMessageStore implements InboundMessageStore {
     const row = this.rows.get(key);
     if (row !== undefined) this.rows.set(key, { ...row, processed_at });
   }
+
+  /**
+   * Delete every retained row for one tenant during tenant erasure.
+   *
+   * The caller must already hold export evidence and legal-hold clearance;
+   * this only removes rows so deleted tenant data cannot reappear.
+   *
+   * @param tenant_id - Tenant whose retained rows must be forgotten.
+   * @returns Number of rows removed.
+   */
+  async evict_tenant(tenant_id: string): Promise<number> {
+    require_id(tenant_id, "tenant_id");
+    let removed = 0;
+    for (const [key, row] of this.rows) {
+      if (row.tenant_id === tenant_id) {
+        this.rows.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
 }
 
 /** Parameterized Postgres store for inbound_messages. */

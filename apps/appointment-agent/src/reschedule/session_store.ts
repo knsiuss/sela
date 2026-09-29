@@ -81,6 +81,27 @@ export class InMemoryRescheduleSessionStore implements RescheduleSessionStore {
     return copy_session(session);
   }
 
+  /**
+   * Delete every session for one tenant during tenant erasure.
+   *
+   * Sessions are ephemeral flow state, so erasure removes them in every
+   * mode; the caller must already hold export evidence and hold clearance.
+   *
+   * @param tenant_id - Tenant whose sessions must be forgotten.
+   * @returns Number of sessions removed.
+   */
+  async evict_tenant(tenant_id: string): Promise<number> {
+    validate_reschedule_session_scope({ tenant_id, conversation_id: "eviction-probe" });
+    let removed = 0;
+    for (const [key, session] of this.rows) {
+      if (session.tenant_id === tenant_id) {
+        this.rows.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
   /** Create or compare-and-swap one validated session snapshot. */
   async commit(
     scope: RescheduleSessionScope,
