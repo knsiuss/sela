@@ -1,0 +1,52 @@
+name: db-integration
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  postgres-gate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: appointment_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/appointment_test
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/appointment_test
+      DATABASE_GATE_REQUIRE_TLS: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter appointment-agent typecheck
+      - name: Apply migrations and run P0.5 database gate integration tests
+        run: pnpm --filter appointment-agent exec vitest run test/production_gate.test.ts test/production_gate_integration.test.ts
+      - name: Prove db:gate fails closed without backup and restore evidence
+        run: |
+          set +e
+          pnpm --filter appointment-agent db:gate > /tmp/db-gate-output.json 2>&1
+          code=$?
+          set -e
+          cat /tmp/db-gate-output.json
+          if [ "$code" -ne 1 ]; then
+            echo "expected db:gate to exit 1 without recovery evidence, got $code"
+            exit 1
+          fi
+          grep -q '"event":"database_gate_completed"' /tmp/db-gate-output.json
