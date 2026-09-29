@@ -6,7 +6,21 @@ import {
   WhatsAppSender,
 } from "@repo/wa-sender";
 import type { OutboundSenderPort, OutboundSenderRegistry } from "../worker/loop.js";
-import { SingleTenantOutboundSenderRegistry } from "./sender_registry.js";
+import { mark_multi_tenant_sender_registry, SingleTenantOutboundSenderRegistry } from "./sender_registry.js";
+import { TenantSecretSenderRegistry } from "./tenant_sender_registry.js";
+import {
+  AuditedSecretManager,
+  EnvSecretManager,
+} from "../security/secret_manager.js";
+import type { MetricsSink } from "../observability/metrics.js";
+import type { SecretAccessSink } from "../security/secret_manager.js";
+import {
+  collect_binding_refs,
+  parse_tenant_sender_bindings,
+  TENANT_SENDER_REFS_ENV,
+  TenantSenderCredentialStore,
+  type TenantSenderRefs,
+} from "../security/tenant_sender_credentials.js";
 import { WhatsAppSenderAdapter } from "./whatsapp_sender_adapter.js";
 
 /** Safe failure when outbound transport configuration is incomplete. */
@@ -24,27 +38,42 @@ export const DEFAULT_IN_MEMORY_TENANT_ID = "1";
 /** Default Graph API base URL; deployments should pin a verified version. */
 export const DEFAULT_WHATSAPP_GRAPH_API_URL = "https://graph.facebook.com/v23.0";
 
+/** Optional audit and metrics dependencies for secret-backed resolution. */
+export interface RuntimeSenderDependencies {
+  secret_access_sink?: SecretAccessSink;
+  metrics?: MetricsSink;
+}
+
 /**
  * Build the fail-closed tenant registry used by runtime composition.
  *
- * Database-backed mode requires TENANT_ID. The in-memory local mode uses tenant
- * `1` when TENANT_ID is absent, preserving the existing one-sender pilot without
- * permitting another tenant to reuse it.
+ * Database-backed mode resolves sender credentials per tenant through the
+ * secret-manager port and fails closed without an explicit tenant mapping;
+ * no process-global credential fallback exists on that path. The explicit
+ * in-memory local mode keeps the single-sender pilot on tenant `1` unless
+ * TENANT_ID overrides it.
  *
  * @param env - Environment mapping; defaults to process.env.
- * @returns A registry bound to the configured runtime tenant.
+ * @param dependencies - Optional secret audit sink and metrics.
+ * @returns A registry bound to the configured runtime tenants.
  * @throws RuntimeSenderConfigurationError for invalid or missing settings.
  */
 export function build_runtime_sender(
   env: Record<string, string | undefined> = process.env,
+  dependencies: RuntimeSenderDependencies = {},
 ): OutboundSenderRegistry {
+  if (has_database_url(env)) return build_database_sender_registry(env, dependencies);
   const sender = build_sender_adapter(env);
-  const tenant_id = resolve_runtime_tenant_id(env, has_database_url(env));
+  const tenant_id = resolve_runtime_tenant_id(env, false);
   return new SingleTenantOutboundSenderRegistry(tenant_id, sender);
 }
 
 /**
- * Resolve the tenant allowed to use the environment-built sender.
+ * Resolve the tenant allowed to use an explicitly injected single sender.
+ *
+ * This helper serves legacy injected-sender and in-memory paths only. The
+ * environment-built database sender no longer uses it: per-tenant secret
+ * mappings replace the process-global fallback there.
  *
  * @param env - Environment mapping.
  * @param is_database_backed - Whether the composition uses persistent storage.
@@ -96,6 +125,46 @@ function build_sender_adapter(env: Record<string, string | undefined>): Outbound
 function has_database_url(env: Record<string, string | undefined>): boolean {
   const value = env["DATABASE_URL"];
   return typeof value === "string" && value.trim() !== "";
+}
+
+/**
+ * Build the per-tenant secret-backed registry for database mode.
+ *
+ * Unmapped tenants fail closed at send time, so the returned registry is
+ * marked multi-tenant: the global claimer is safe because no tenant can
+ * reuse another tenant's credentials.
+ */
+function build_database_sender_registry(
+  env: Record<string, string | undefined>,
+  dependencies: RuntimeSenderDependencies,
+): OutboundSenderRegistry {
+  let bindings: Map<string, TenantSenderRefs>;
+  try {
+    bindings = parse_tenant_sender_bindings(env[TENANT_SENDER_REFS_ENV]);
+  } catch {
+    throw new RuntimeSenderConfigurationError("tenant-sender-mapping-invalid");
+  }
+  if (bindings.size === 0) {
+    throw new RuntimeSenderConfigurationError("tenant-sender-mapping-required");
+  }
+  const secret_manager = new AuditedSecretManager(
+    new EnvSecretManager(env, collect_binding_refs(bindings)),
+    dependencies.secret_access_sink,
+    dependencies.metrics,
+  );
+  const credential_store = new TenantSenderCredentialStore(secret_manager, bindings, {
+    sink: dependencies.secret_access_sink,
+    metrics: dependencies.metrics,
+  });
+  const graph_api_url = env["WHATSAPP_GRAPH_API_URL"] ?? DEFAULT_WHATSAPP_GRAPH_API_URL;
+  const request_timeout_ms = parse_positive_integer(env["WHATSAPP_REQUEST_TIMEOUT_MS"] ?? "10000");
+  return mark_multi_tenant_sender_registry(
+    new TenantSecretSenderRegistry({
+      credential_store,
+      graph_api_url,
+      request_timeout_ms,
+    }),
+  );
 }
 
 function required_setting(env: Record<string, string | undefined>, name: string): string {

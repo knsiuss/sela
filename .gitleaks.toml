@@ -1,0 +1,16 @@
+# Gitleaks configuration: fail CI on leaked secrets, allow documented fixtures.
+title = "appointment-agent secret scan"
+
+[allowlist]
+description = "Documented dummy fixtures and placeholders; never live credentials."
+paths = [
+  '''gitleaks.toml''',
+  '''.gitleaks.toml''',
+]
+regexes = [
+  '''configured-test-token''',
+  '''test-token-[a-z0-9-]+''',
+  '''test-secret-app''',
+  '''test\.invalid''',
+  '''phone-(test|tenant-[a-z]|local)''',
+]

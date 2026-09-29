@@ -3,6 +3,7 @@ import {
   build_runtime_sender,
   RuntimeSenderConfigurationError,
 } from "../src/outbound/runtime_sender.js";
+import { is_multi_tenant_sender_registry } from "../src/outbound/sender_registry.js";
 import type { OutboundDraft } from "../src/worker/process_job.js";
 
 const DRAFT: OutboundDraft = {
@@ -14,7 +15,7 @@ const DRAFT: OutboundDraft = {
 };
 
 describe("runtime sender composition", () => {
-  it("requires an explicit tenant binding for database-backed credentials", () => {
+  it("requires an explicit per-tenant sender mapping for database-backed mode", () => {
     expect(() =>
       build_runtime_sender({
         DATABASE_URL: "postgres://test.invalid/app",
@@ -28,7 +29,7 @@ describe("runtime sender composition", () => {
         WHATSAPP_PHONE_NUMBER_ID: "phone-test",
         WHATSAPP_API_TOKEN: "configured-test-token",
       }),
-    ).toThrow("TENANT_ID-required");
+    ).toThrow("tenant-sender-mapping-required");
   });
 
   it("keeps the explicit in-memory default on tenant 1", async () => {
@@ -40,15 +41,21 @@ describe("runtime sender composition", () => {
     await expect(registry.send("1", DRAFT)).resolves.toMatchObject({ status: "sent" });
   });
 
-  it("rejects a different tenant when a single-tenant binding is explicit", async () => {
+  it("resolves database senders per tenant and fails closed when unmapped", async () => {
     const registry = build_runtime_sender({
       DATABASE_URL: "postgres://test.invalid/app",
-      TENANT_ID: "tenant-a",
-      WHATSAPP_PHONE_NUMBER_ID: "phone-test",
-      WHATSAPP_API_TOKEN: "configured-test-token",
+      WHATSAPP_TENANT_SENDER_REFS_JSON: JSON.stringify({
+        "tenant-a": {
+          phone_number_id_ref: "WHATSAPP_TENANT_A_PHONE_NUMBER_ID",
+          access_token_ref: "WHATSAPP_TENANT_A_API_TOKEN",
+        },
+      }),
+      WHATSAPP_TENANT_A_PHONE_NUMBER_ID: "phone-test",
+      WHATSAPP_TENANT_A_API_TOKEN: "configured-test-token",
     });
 
-    await expect(registry.send("tenant-b", DRAFT)).rejects.toMatchObject({
+    expect(is_multi_tenant_sender_registry(registry)).toBe(true);
+    await expect(registry.send("tenant-unknown", DRAFT)).rejects.toMatchObject({
       code: "tenant_sender_not_configured",
     });
   });

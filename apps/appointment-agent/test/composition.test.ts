@@ -65,13 +65,21 @@ describe("composition", () => {
           WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64: Buffer.alloc(32, 4).toString("base64"),
         },
       }),
-    ).toThrow("WHATSAPP_API_TOKEN-required");
+    ).toThrow("tenant-sender-mapping-required");
   });
 
   it("selects the Postgres session store in database-backed mode", async () => {
     const composition = build_composition({
       env: {
         DATABASE_URL: "postgres://test.invalid/app",
+        WHATSAPP_TENANT_SENDER_REFS_JSON: JSON.stringify({
+          "42": {
+            phone_number_id_ref: "WHATSAPP_TENANT_42_PHONE_NUMBER_ID",
+            access_token_ref: "WHATSAPP_TENANT_42_API_TOKEN",
+          },
+        }),
+        WHATSAPP_TENANT_42_PHONE_NUMBER_ID: "phone-test",
+        WHATSAPP_TENANT_42_API_TOKEN: "configured-test-token",
         WHATSAPP_PHONE_NUMBER_ID: "phone-test",
         WHATSAPP_API_TOKEN: "configured-test-token",
         TENANT_ID: "42",
@@ -146,7 +154,7 @@ describe("composition", () => {
           WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64: Buffer.alloc(32, 4).toString("base64"),
         },
       }),
-    ).toThrow("TENANT_ID-required");
+    ).toThrow("tenant-sender-mapping-required");
   });
 
   it("requires a production recipient key whenever Postgres is configured", () => {

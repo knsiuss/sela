@@ -187,7 +187,16 @@ function decode_ciphertext(encoded: string): CiphertextEnvelope {
   return envelope;
 }
 
-function decode_base64url(value: string | undefined): Buffer {
+/**
+ * Decode canonical base64url text without padding.
+ *
+ * Shared with the key-ring module so v1 and v2 envelopes use one codec.
+ *
+ * @param value - Untrusted base64url input.
+ * @returns Decoded bytes.
+ * @throws RecipientCipherError when the encoding is not canonical.
+ */
+export function decode_base64url(value: string | undefined): Buffer {
   if (
     value === undefined ||
     !BASE64URL_PATTERN.test(value) ||
@@ -203,11 +212,28 @@ function decode_base64url(value: string | undefined): Buffer {
   return decoded;
 }
 
-function encode_base64url(value: Buffer): string {
+/**
+ * Encode bytes as unpadded base64url text.
+ *
+ * Shared with the key-ring module so v1 and v2 envelopes use one codec.
+ *
+ * @param value - Bytes to encode.
+ * @returns Canonical base64url text.
+ */
+export function encode_base64url(value: Buffer): string {
   return value.toString("base64url");
 }
 
-function require_e164(value: string): string {
+/**
+ * Require a strict E.164 recipient without echoing it.
+ *
+ * Shared with the key-ring module so both envelope versions enforce one shape.
+ *
+ * @param value - Untrusted recipient input.
+ * @returns The validated recipient.
+ * @throws RecipientCipherError when the shape is invalid.
+ */
+export function require_e164(value: string): string {
   if (typeof value !== "string" || !E164_PATTERN.test(value)) {
     throw new RecipientCipherError("recipient_phone_invalid");
   }
