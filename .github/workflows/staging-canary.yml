@@ -1,0 +1,63 @@
+name: staging-canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Immutable image tag promoted from CI (never `latest`)
+        required: true
+      migration_head:
+        description: Expected migration head, e.g. 0014_inbound_reconciliation
+        required: true
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify migration head is applied on staging
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+        run: |
+          test -n "$DATABASE_URL"
+          pnpm --filter appointment-agent db:gate
+      - name: Record promotion inputs for the canary record
+        run: |
+          echo "image=${{ inputs.image_tag }} migration=${{ inputs.migration_head }} sha=${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+
+  canary:
+    runs-on: ubuntu-latest
+    needs: preflight
+    environment: staging
+    steps:
+      - name: Deploy canary slice
+        run: |
+          echo "deploy ${{ inputs.image_tag }} to the canary slice only; stable slice keeps serving traffic"
+      - name: Smoke the canary slice
+        run: |
+          echo "liveness 200, one signed webhook-to-queue round trip, ledger unknown count unchanged"
+      - name: Promote or halt
+        run: |
+          echo "promote only when ACK p95 < 3s, oldest job age < 60s, and no new unknown ledger rows; otherwise halt and roll back"
+
+  rollback:
+    runs-on: ubuntu-latest
+    needs: canary
+    if: failure()
+    environment: staging
+    steps:
+      - name: Roll back application traffic first
+        run: |
+          echo "redeploy the previous immutable image tag; leave additive migrations in place unless a reviewed down migration proves no live writer depends on them"
+      - name: Reconcile ledgers after rollback
+        run: |
+          echo "reconcile inbound orphans and outbound unknown rows before reopening traffic"

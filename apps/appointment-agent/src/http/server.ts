@@ -9,6 +9,7 @@ import type { InboundMessageStore } from "../ingress/inbound_store.js";
 import type { AtomicIngressStore } from "../ingress/postgres_atomic_ingress.js";
 import type { TenantResolver } from "../ingress/tenant_resolver.js";
 import type { RecipientCipher } from "../security/recipient_cipher.js";
+import { continue_trace, format_traceparent } from "../observability/trace.js";
 import {
   is_valid_signature,
 } from "../ingress/verify.js";
@@ -225,6 +226,7 @@ function safe_path(request: IncomingMessage): string {
 function log_server_error(
   request: IncomingMessage,
   request_id: string,
+  trace_id: string,
   status: number,
   error: unknown,
 ): void {
@@ -234,6 +236,7 @@ function log_server_error(
     JSON.stringify({
       event: "webhook_request_error",
       request_id,
+      trace_id,
       method: request.method ?? "",
       path: safe_path(request),
       status,
@@ -249,12 +252,14 @@ async function handle_http_request(
   dependencies: HttpServerDependencies,
 ): Promise<void> {
   const request_id = generate_request_id();
+  const trace = continue_trace(get_single_header(request, "traceparent"), request_id);
+  response.setHeader("traceparent", format_traceparent(trace));
   try {
     const result = await create_response(request, config, dependencies);
     send_response(response, result);
   } catch (error) {
     const result = error_response(error);
-    log_server_error(request, request_id, result.status, error);
+    log_server_error(request, request_id, trace.trace_id, result.status, error);
     send_response(response, result);
   }
 }

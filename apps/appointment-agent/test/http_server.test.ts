@@ -255,4 +255,18 @@ describe("http webhook server", () => {
       expect(performance.now() - started).toBeLessThan(3_000);
     });
   });
+
+  it("propagates W3C trace context without touching message content", async () => {
+    await with_server(dependencies(), async (base_url) => {
+      const incoming = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+      const continued = await make_request(base_url, "/healthz", { headers: { traceparent: incoming } });
+      expect(continued.status).toBe(200);
+      const header = continued.headers["traceparent"];
+      expect(typeof header).toBe("string");
+      expect(String(header)).toMatch(/^00-4bf92f3577b34da6a3ce929d0e0e4736-[0-9a-f]{16}-01$/);
+
+      const fresh = await make_request(base_url, "/healthz");
+      expect(String(fresh.headers["traceparent"])).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+    });
+  });
 });

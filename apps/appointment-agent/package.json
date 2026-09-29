@@ -9,6 +9,7 @@
     "build": "tsc",
     "test": "vitest run",
     "db:gate": "tsx src/database_gate_cli.ts",
+    "db:restore-rehearsal": "tsx src/restore_rehearsal_cli.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

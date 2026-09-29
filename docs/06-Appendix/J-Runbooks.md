@@ -37,3 +37,34 @@ P0.6 evidence: per-tenant Meta credentials resolve at runtime through the secret
 1. Revoke first: call `revoke_tenant(tenant_id)` (or remove the tenant mapping and restart) so the tenant fails closed before provider I/O. Process revocation lasts until restart; the durable control is rotating or disabling the credential in the secret provider. Preserve `secret_access_total{operation="revoke"}` and the audit sink events; never paste secret values into the incident record.
 2. Rotate the Meta credential in the secret provider, then confirm a canary send for the tenant and an unmapped-tenant fail-closed check. Roll back by re-revoking; rotation applies to new sends without a restart.
 3. Rotate a recipient key by adding the new key id to `WHATSAPP_RECIPIENT_ENCRYPTION_KEYS_JSON` with the old id retained (overlap ≤8 keys), switching `active_key_id`, and verifying old rows still open. Remove the old id only after retention expiry. Approval: security owner + on-call sign-off; record key ids (never values), timestamps, and the rotation drill result here.
+
+## RB-14 Incident severity, communications, and postmortem (owner: SRE)
+
+P1.4 evidence: severity levels, communications roles, postmortem template, and the first on-call handoff exercise record live here; no separate incident doc is authoritative.
+
+Severity levels (customer impact decides, not effort):
+
+1. SEV1 critical: booking writes failing, cross-tenant leak suspected, or provider outage with no failover. Page on-call immediately; acknowledge within 5 minutes.
+2. SEV2 major: degraded ACK latency (>3s p95), queue age (>60s oldest job), or single-tenant outage. Page on-call; acknowledge within 15 minutes.
+3. SEV3 minor: elevated error budget burn, single retry storm, or non-blocking integration fault. Ticket for the owning team; review within one business day.
+4. SEV4 informational: threshold warnings with no customer impact. Ticket only; review at the next ops cadence.
+
+Communications roles (declare at incident start, record in the incident thread):
+
+1. Incident commander owns priority, scope, and the decision log.
+2. Operations lead executes runbook steps and reports state changes only (no raw message content, recipients, or secrets in chat).
+3. Customer liaison owns status updates to affected tenants with plain-language impact and next-update time.
+4. Scribe records timeline, commands, and evidence links for the postmortem.
+
+Postmortem template (file within 48 hours for SEV1/SEV2, link the incident thread):
+
+1. Summary: one paragraph of customer impact with start/end timestamps.
+2. Timeline: detection, escalation, mitigation, and resolution with evidence links.
+3. Root cause: failed contract or invariant, not a person.
+4. Remediation: code or runbook change with owner and due date; verification test named.
+5. Follow-ups: residual risks moved to the backlog with explicit owners.
+
+On-call handoff exercise record:
+
+1. First tabletop exercise: scheduled before pilot traffic; participants are the on-call, backend owner, and customer liaison. Scenario: Meta timeout storm with `unknown` ledger rows. Validate: paging works, RB-08/RB-10 steps execute in order, no manual replay without MFA audit.
+2. Record here after the exercise: date, participants, scenario, time-to-acknowledge, gaps found, and remediation owners. An unrecorded exercise did not happen.
