@@ -223,21 +223,21 @@ describe("postgres lifecycle SQL contracts", () => {
 describe("privacy views and policy", () => {
   it("exposes named tunable defaults for every category", () => {
     expect(DEFAULT_DATA_RETENTION_POLICY).toMatchObject({
-      inbound_days: 30,
-      session_days: 7,
-      job_days: 90,
-      outbound_days: 90,
-      audit_days: 365,
-      rate_limit_bucket_days: 2,
+      inbound_days: 90,
+      session_days: 30,
+      job_days: 180,
+      outbound_days: 180,
+      audit_days: 730,
+      rate_limit_bucket_days: 7,
     });
   });
 
   it("renders quotable retention sentences for a future privacy policy", () => {
     const lines = retention_policy_statement(DEFAULT_DATA_RETENTION_POLICY);
     const joined = lines.join("\n");
+    expect(joined).toContain("90 days");
     expect(joined).toContain("30 days");
-    expect(joined).toContain("7 days");
-    expect(joined).toContain("365 days");
+    expect(joined).toContain("730 days");
     expect(joined).toContain("legal hold");
     expect(joined).toContain("Idempotency claims are never deleted");
   });

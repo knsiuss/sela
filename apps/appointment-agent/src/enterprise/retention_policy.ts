@@ -1,31 +1,39 @@
 /** Named retention periods for customer, operational, and evidence data. */
 
+/*
+ * Enterprise retention schedule (owner decision, Sept 2026): windows are
+ * deliberately longer than the pilot minimums for audit/compliance needs.
+ * Trade-off: longer retention enlarges the PII breach surface, since raw
+ * inbound content and delivery evidence live longer; the enterprise audit
+ * requirement wins per owner, and legal holds still suppress deletion.
+ */
+
 /**
  * Retention window for raw inbound content (message text, sender references,
  * encrypted reply targets). Shortest window because it carries raw PII.
  */
-export const INBOUND_RETENTION_DAYS = 30;
+export const INBOUND_RETENTION_DAYS = 90;
 
 /** Retention window for ephemeral reschedule session state. */
-export const SESSION_RETENTION_DAYS = 7;
+export const SESSION_RETENTION_DAYS = 30;
 
 /**
  * Retention window for terminal worker jobs. Only jobs detached from their
  * idempotency claim are eligible; claimed or active jobs are never purged.
  */
-export const JOB_RETENTION_DAYS = 90;
+export const JOB_RETENTION_DAYS = 180;
 
 /** Retention window for terminal outbound ledger rows (delivery evidence). */
-export const OUTBOUND_RETENTION_DAYS = 90;
+export const OUTBOUND_RETENTION_DAYS = 180;
 
 /**
  * Retention window for append-only audit evidence. Audit rows are archived,
  * never hard-purged; they leave the system only through tenant erasure.
  */
-export const AUDIT_RETENTION_DAYS = 365;
+export const AUDIT_RETENTION_DAYS = 730;
 
 /** Retention window for fixed-window rate-limit buckets. */
-export const RATE_LIMIT_BUCKET_RETENTION_DAYS = 2;
+export const RATE_LIMIT_BUCKET_RETENTION_DAYS = 7;
 
 /** Per-category retention windows; audit evidence is archived, never purged. */
 export interface DataRetentionPolicy {
