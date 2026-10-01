@@ -2,9 +2,10 @@
 
 > **Purpose:** Execution backlog for moving the Path A WhatsApp appointment agent from a hardened MVP backend to an enterprise-grade production service.
 >
-> **Status date:** 25 September 2026
+> **Status date:** 1 October 2026
 > **Repository branch at creation:** `feature/tenant-aware-whatsapp-worker`
 > **Implementation baseline:** `fc8f7b6` (before this documentation commit)
+> **Last verified against code:** `739d8e5` (Gate A pilot attempt, 1 October 2026 — see "Residual risk")
 > **Important:** This document is a readiness checklist, not a claim that the system is already enterprise-ready.
 
 ## Status legend
@@ -32,7 +33,7 @@ A checkbox may only be marked complete when the evidence column or linked artifa
 - [x] Meta Graph origin, port, redirect, timeout, and token-bearing request protections.
 - [x] 24-hour customer service-window behavior and non-promotional utility boundary.
 - [x] Langfuse/observability integration point exists in the architecture.
-- [x] Current automated baseline: the default appointment-agent suite passes with unit/reliability coverage; 11 PostgreSQL calendar/ledger integration tests require `TEST_DATABASE_URL` and are explicitly skipped without it.
+- [x] Current automated baseline: the default appointment-agent suite passes with unit/reliability coverage; 21 PostgreSQL calendar/ledger and production-gate integration tests require `TEST_DATABASE_URL` and are explicitly skipped without it. Last full local run: 78 test files passed, 2 skipped; 613 tests passed, 21 skipped; monorepo `pnpm typecheck` and `pnpm test` both 14/14 green at commit `739d8e5`.
 - [x] Tenant-scoped rate limiting is implemented in `src/rate_limit/tenant_rate_limiter.ts` with Postgres fixed-window and explicit local adapters.
 - [x] PII-minimal outbound ledger and signed status ingestion are implemented in `src/outbound/` and `0013_rate_limit_outbound_ledger.sql`.
 - [x] Metrics, SLO evaluation, alert thresholds, operator RBAC/OIDC contracts, data lifecycle, DR, and capacity contracts have executable tests.
@@ -44,11 +45,13 @@ A checkbox may only be marked complete when the evidence column or linked artifa
 - [~] The database-backed default now uses a durable Postgres calendar writer; migration `0013`, RLS/role checks, TLS/timeouts, and backup/restore evidence tooling exist, but external production-like evidence is not committed.
 - [~] Ambiguous outbound commits are fenced as `unknown` and inbound claims fail closed; a scheduled operator reconciliation/repair worker and customer-support runbook remain open.
 - [x] Outbound idempotency, lifecycle state, lease fencing, signed status ingestion, and partial-draft replay are implemented in the durable ledger path; production credential/provider reconciliation remains open.
-- [~] `db:gate` performs read-only schema/RLS/role/TLS/timeout checks and requires external backup/restore evidence; no production database run has been executed in this environment.
-- [ ] No live Meta WABA, approved utility template, signed webhook, or delivery-status smoke test has been completed because staging credentials/access were unavailable.
+- [~] `db:gate` performs read-only schema/RLS/role/TLS/timeout checks and requires external backup/restore evidence. Verified fail-closed in this environment: with no `DATABASE_URL` it exits 2 and emits `database_gate_blocked`; `db:restore-rehearsal` likewise exits 2 with `restore_rehearsal_blocked`. No production-like PostgreSQL run, TLS check, or backup/PITR restore rehearsal has been executed here.
+- [ ] No live Meta WABA, approved utility template, signed webhook, or delivery-status smoke test has been completed because staging credentials/access were unavailable. Verified fail-closed in this environment: `smoke:meta` without `META_SMOKE_ENVIRONMENT=staging` exits 2 with `meta_staging_smoke_blocked`. No Meta credential is present in this environment, so no live call was attempted.
+- [!] Pilot environment provisioning is blocked on credentials that are absent here: no `DATABASE_URL`/`TEST_DATABASE_URL`, no Meta WABA token/app-secret/verify-token, no `SUPABASE_AUTH_*` triple, and no backup/restore evidence references. Only `.env.example` (all secret values blank) exists; no `.env` is present. Re-run steps 2-4 of the Gate A pilot once a dedicated pilot database and Meta staging tenant are supplied.
 - [~] Retention/legal-hold/redacted operator views are implemented, but tenant deletion/export, key rotation, and formal privacy evidence remain open.
 - [ ] The explicit multi-tenant registry marker asserts deployment coverage but does not yet health-check actual tenant coverage.
-- [ ] `docs/README.md` contains unrelated working-tree changes and must not be staged accidentally.
+- [ ] `docs/README.md` contains unrelated working-tree changes and must not be staged accidentally. (Still unstaged as of `c3b9e04`; deliberately excluded from every Gate A commit.)
+- [!] Do NOT point `TEST_DATABASE_URL` at an existing production/staging project. The integration suites run `DROP SCHEMA public CASCADE` before applying migrations. The only Supabase project reachable from this environment hosts an unrelated application (PPDB school admissions) with live rows; it was deliberately not touched. Provision a dedicated, disposable pilot database first.
 
 ## Priority model
 
@@ -428,17 +431,17 @@ Do not begin broad feature expansion while a P0 item is open. A dashboard or a s
 
 All boxes must be checked:
 
-- [ ] Atomic old-appointment reschedule is implemented and tested.
-- [ ] Durable calendar writer is used in the pilot composition.
-- [ ] No P0 security or correctness findings remain.
-- [ ] Ingress and outbound reconciliation are active.
-- [ ] Production-like Postgres/RLS/TLS verification passes.
-- [ ] Backup restore has been rehearsed.
-- [ ] Meta WABA and utility template are approved.
-- [ ] Signed webhook-to-reply smoke test passes.
-- [ ] Load and failure tests meet the agreed pilot threshold.
-- [ ] On-call runbooks and alerts exist.
-- [ ] Pilot support and rollback procedures are approved.
+- [x] Atomic old-appointment reschedule is implemented and tested. (`src/calendar/`, `src/reschedule/`, `src/appointments/`, migration `0012`; unit + migration-contract coverage green.)
+- [x] Durable calendar writer is used in the pilot composition. (`PostgresCalendarWriter` selected by `build_composition` whenever `DATABASE_URL` is set; `composition.test.ts` green.)
+- [x] No P0 security or correctness findings remain. (Inline review of the Gate A delta found no Critical/High issue: tenant-bound recipient decryption, reschedule tenant+version checks, calendar operation-key fingerprint conflict, outbound `unknown` fencing, operator authorize-before-side-effect, and server-only RLS/grants on `0012`/`0013` tables all verified. No credentials or PII reach logs, metrics labels, or fixtures.)
+- [~] Ingress and outbound reconciliation are active. (Runners exist and are wired; scheduling in the pilot process is not yet enabled.)
+- [ ] Production-like Postgres/RLS/TLS verification passes. (Blocked: no `DATABASE_URL`; `db:gate` verified fail-closed at exit 2.)
+- [ ] Backup restore has been rehearsed. (Blocked: no database target and no recovery-evidence references.)
+- [ ] Meta WABA and utility template are approved. (Blocked: no Meta credentials in this environment.)
+- [ ] Signed webhook-to-reply smoke test passes. (Blocked: `smoke:meta` verified fail-closed at exit 2 without a staging target.)
+- [ ] Load and failure tests meet the agreed pilot threshold. (Capacity/traffic contracts are executable, but no agreed numeric pilot threshold has been measured against a live database.)
+- [x] On-call runbooks and alerts exist. (`docs/06-Appendix/J-Runbooks.md`; SLO and alert evaluation covered by executable tests.)
+- [ ] Pilot support and rollback procedures are approved. (Requires owner sign-off.)
 
 ## Gate B — Enterprise GA
 
@@ -497,3 +500,33 @@ A code change without an operational owner, failure behavior, and recovery path 
 # Maintenance rule
 
 Review this file at every release gate. When an item is completed, replace the checkbox with `[x]`, add the evidence link, update the status date, and record any new residual risk in `05-Risk-Register.md` or `07-Postmortems.md` when applicable.
+
+# Residual risk — Gate A pilot attempt (1 October 2026)
+
+**Outcome:** code-complete and locally green; the pilot could not be driven to GREEN because no pilot credentials exist in this environment. Nothing below is inferred or assumed — each item is an observed blocker.
+
+## Verified this run
+
+- Monorepo `pnpm typecheck` 14/14 and `pnpm test` 14/14 green at `739d8e5`; appointment-agent 78 files passed / 2 skipped, 613 tests passed / 21 skipped.
+- Fixed a real regression inherited from the previous baseline: `e9461c4` was **red** (2 files, 10 tests failing) because the worker and reschedule session store read the wall clock, so the 24-hour service-window and session-expiry assertions broke once the fixtures aged past. Both now take an injected clock.
+- Gate A WIP is committed as four atomic conventional commits (`c20ba64`, `739d8e5`, `6934eca`, `c3b9e04`), each independently typechecked and suite-verified in a detached worktree.
+- All three operational gates fail closed with no credentials and leak no secret material: `db:gate` and `db:restore-rehearsal` exit 2 (`*_blocked`), `smoke:meta` exits 2 (`meta_staging_smoke_blocked`).
+
+## Blocked on absent credentials (owner action required)
+
+1. **Pilot database.** No `DATABASE_URL` or `TEST_DATABASE_URL`. Migrations 0001-0014 were therefore never applied, the 21 integration tests never ran with a database, and `db:gate` produced no schema/RLS/role/TLS/timeout evidence. Needs a dedicated disposable pilot Postgres.
+2. **Backup / point-in-time restore rehearsal.** Not performed. No recovery-evidence references exist, so `db:gate` cannot pass its `backup` and `restore` checks even once a database is supplied. Needs a real backup plus a recorded restore.
+3. **Live Meta.** No WABA, phone-number id, app secret, verify token, approved utility template, or test recipient. WABA verification, signed webhook smoke, one live outbound reply, delivery-status round-trip, token-scope review, and provider error/rate-limit/timeout/revoked-token behavior are all unexercised.
+4. **Identity provider.** No `SUPABASE_AUTH_*` triple, so the operator API verifier cannot be exercised against a real issuer.
+
+## Accepted risks / judgement calls
+
+- The integration suites run `DROP SCHEMA public CASCADE` and `CREATE ROLE`; they are destructive by design and must only ever target a disposable database. The single Supabase project reachable from this environment runs an unrelated application with live rows, so it was deliberately left untouched rather than reused.
+- No local PostgreSQL is usable here (PostgreSQL 18 install has no binaries, Docker daemon cannot start without elevation, WSL2 virtualization is disabled), so no substitute production-like target was available.
+- P3 cost, capacity, regional, and analytics contracts are committed and unit-tested but are not yet consumed by any runtime wiring; they are contracts, not behavior.
+
+## Not verified by this run
+
+- Anything requiring a live database, a live Meta tenant, or a real identity provider (see above).
+- Load and failure thresholds: no agreed numeric pilot threshold has been measured.
+
