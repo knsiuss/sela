@@ -19,6 +19,8 @@ export interface DatabaseProductionGateOptions {
   transaction_timeout_ms?: number;
   /** Bounded pool size; validated when supplied. */
   max_pool_size?: number;
+  /** Clock returning epoch milliseconds; injected for deterministic tests. */
+  now?: () => number;
 }
 
 /** One evidence-backed gate check. */
@@ -33,6 +35,12 @@ export interface DatabaseGateReport {
   passed: boolean;
   checks: DatabaseGateCheck[];
 }
+
+/** Maximum age of backup/restore drill evidence before it stops counting as DR proof. */
+export const MAX_RECOVERY_EVIDENCE_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** Future clock-skew tolerance for evidence timestamps from the restore system. */
+export const RECOVERY_EVIDENCE_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 /** Safe failure raised by the CLI when any required gate check fails. */
 export class DatabaseProductionGateError extends Error {
@@ -71,8 +79,9 @@ export async function run_database_production_gate(
   checks.push(await check_sequence_privileges(sql_client));
   checks.push(await check_timeouts(sql_client, options));
   checks.push(await check_tls(sql_client, options.require_tls !== false));
-  checks.push(check_recovery_evidence("backup", options.backup_evidence));
-  checks.push(check_recovery_evidence("restore", options.restore_evidence));
+  const now_ms = read_gate_clock(options.now);
+  checks.push(check_recovery_evidence("backup", options.backup_evidence, now_ms));
+  checks.push(check_recovery_evidence("restore", options.restore_evidence, now_ms));
   return { passed: checks.every((check) => check.passed), checks };
 }
 
@@ -286,14 +295,31 @@ async function check_tls(sql_client: SqlClient, required: boolean): Promise<Data
 function check_recovery_evidence(
   name: "backup" | "restore",
   evidence: DatabaseRecoveryEvidence | undefined,
+  now_ms: number,
 ): DatabaseGateCheck {
-  const valid = evidence !== undefined
-    && Number.isFinite(Date.parse(evidence.verified_at_iso))
-    && typeof evidence.reference === "string"
+  const verified_ms = evidence === undefined ? Number.NaN : Date.parse(evidence.verified_at_iso);
+  // A stale drill is not DR evidence: reject timestamps older than the
+  // product-tuned max age or beyond clock-skew into the future. Reasons stay
+  // generic so no timestamp detail leaks into gate output.
+  const fresh = Number.isFinite(verified_ms)
+    && verified_ms <= now_ms + RECOVERY_EVIDENCE_CLOCK_SKEW_MS
+    && now_ms - verified_ms <= MAX_RECOVERY_EVIDENCE_AGE_MS;
+  const valid = fresh
+    && typeof evidence?.reference === "string"
     && evidence.reference.trim() !== ""
     && evidence.reference.length <= 256
     && !/[\u0000-\u001f\u007f]/u.test(evidence.reference);
-  return check(valid, name, valid ? "external recovery evidence supplied" : "backup/restore evidence missing");
+  return check(valid, name, valid ? "external recovery evidence supplied" : "backup/restore evidence missing or stale");
+}
+
+function read_gate_clock(now: (() => number) | undefined): number {
+  try {
+    const value = now?.() ?? Date.now();
+    if (Number.isFinite(value)) return value;
+  } catch {
+    // Fall through to the safe default below.
+  }
+  return Date.now();
 }
 
 function first_record(result: SqlQueryResult): Record<string, unknown> {

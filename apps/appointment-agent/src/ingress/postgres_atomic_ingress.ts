@@ -76,10 +76,10 @@ const VERIFY_COMPLETE_CLAIM_SQL = `
 
 const INSERT_INBOUND_SQL = `
   INSERT INTO inbound_messages (
-    tenant_id, wamid, conversation_id, message_type, button_id, sender_ref,
+    tenant_id, wamid, conversation_id, message_type, button_id, appointment_id, sender_ref,
     reply_target_ciphertext, message_text, received_at, expires_at
   )
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
   RETURNING id
 `;
 
@@ -209,6 +209,7 @@ async function insert_inbound_message(
     record.conversation_id,
     record.message_type,
     record.button_id,
+    record.appointment_id ?? null,
     record.sender_ref,
     record.reply_target_ciphertext,
     record.message_text,
@@ -282,6 +283,9 @@ function validate_input(input: AtomicIngressInput): AtomicIngressInput {
   require_id(record.conversation_id, "conversation_id", 128);
   require_id(record.message_type, "message_type", 64);
   if (record.button_id !== null) require_id(record.button_id, "button_id", 64);
+  if (record.appointment_id !== undefined && record.appointment_id !== null) {
+    require_appointment_id(record.appointment_id);
+  }
   require_id(record.sender_ref, "sender_ref", 256);
   require_ciphertext(record.reply_target_ciphertext);
   require_text(record.message_text);
@@ -305,6 +309,16 @@ function validate_input(input: AtomicIngressInput): AtomicIngressInput {
 function require_id(value: unknown, field_name: string, max_length = 256): string {
   if (typeof value !== "string" || value.trim() === "" || value.length > max_length) {
     throw new AtomicIngressStoreError(`atomic-ingress-${field_name}-invalid`);
+  }
+  return value;
+}
+
+function require_appointment_id(value: unknown): string {
+  if (
+    typeof value !== "string"
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  ) {
+    throw new AtomicIngressStoreError("atomic-ingress-appointment_id-invalid");
   }
   return value;
 }

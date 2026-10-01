@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { build_composition, CompositionConfigurationError } from "../src/composition.js";
 import { PostgresRescheduleSessionStore } from "../src/reschedule/postgres_session_store.js";
 import { InMemoryRescheduleSessionStore } from "../src/reschedule/session_store.js";
+import { PostgresAppointmentRepository } from "../src/appointments/appointment_repository.js";
 import { mark_multi_tenant_sender_registry } from "../src/outbound/sender_registry.js";
 import type { OutboundSenderPort, OutboundSenderRegistry } from "../src/worker/loop.js";
 
@@ -48,6 +49,12 @@ describe("composition", () => {
       build_composition({
         env: {
           DATABASE_URL: "postgres://test.invalid/app",
+        CALENDAR_SLOTS_JSON: JSON.stringify([{
+          id: "slot-1",
+          start_iso: "2026-10-01T09:00:00.000Z",
+          end_iso: "2026-10-01T09:30:00.000Z",
+          resource_id: "7",
+        }]),
           USE_IN_MEMORY: "true",
           WHATSAPP_TRANSPORT: "memory",
           WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64: Buffer.alloc(32, 5).toString("base64"),
@@ -56,11 +63,17 @@ describe("composition", () => {
     ).toThrow("DATABASE_URL and USE_IN_MEMORY=true are mutually exclusive");
   });
 
-  it("fails closed when a database-backed runtime has no Meta sender credentials", () => {
+  it("fails closed without a per-tenant sender mapping in database-backed mode", () => {
     expect(() =>
       build_composition({
         env: {
           DATABASE_URL: "postgres://test.invalid/app",
+        CALENDAR_SLOTS_JSON: JSON.stringify([{
+          id: "slot-1",
+          start_iso: "2026-10-01T09:00:00.000Z",
+          end_iso: "2026-10-01T09:30:00.000Z",
+          resource_id: "7",
+        }]),
           WHATSAPP_PHONE_NUMBER_ID: "phone-test",
           WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64: Buffer.alloc(32, 4).toString("base64"),
         },
@@ -72,6 +85,12 @@ describe("composition", () => {
     const composition = build_composition({
       env: {
         DATABASE_URL: "postgres://test.invalid/app",
+        CALENDAR_SLOTS_JSON: JSON.stringify([{
+          id: "slot-1",
+          start_iso: "2026-10-01T09:00:00.000Z",
+          end_iso: "2026-10-01T09:30:00.000Z",
+          resource_id: "7",
+        }]),
         WHATSAPP_TENANT_SENDER_REFS_JSON: JSON.stringify({
           "42": {
             phone_number_id_ref: "WHATSAPP_TENANT_42_PHONE_NUMBER_ID",
@@ -80,14 +99,12 @@ describe("composition", () => {
         }),
         WHATSAPP_TENANT_42_PHONE_NUMBER_ID: "phone-test",
         WHATSAPP_TENANT_42_API_TOKEN: "configured-test-token",
-        WHATSAPP_PHONE_NUMBER_ID: "phone-test",
-        WHATSAPP_API_TOKEN: "configured-test-token",
-        TENANT_ID: "42",
         WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64: Buffer.alloc(32, 4).toString("base64"),
       },
     });
     expect(composition.reschedule_session_store).toBeInstanceOf(PostgresRescheduleSessionStore);
-    expect(composition.worker_tenant_id).toBe("42");
+    expect(composition.appointment_repository).toBeInstanceOf(PostgresAppointmentRepository);
+    expect(composition.worker_tenant_id).toBeUndefined();
     await composition.stop();
   });
 
@@ -98,6 +115,12 @@ describe("composition", () => {
     const composition = build_composition({
       env: {
         DATABASE_URL: "postgres://test.invalid/app",
+        CALENDAR_SLOTS_JSON: JSON.stringify([{
+          id: "slot-1",
+          start_iso: "2026-10-01T09:00:00.000Z",
+          end_iso: "2026-10-01T09:30:00.000Z",
+          resource_id: "7",
+        }]),
         WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64: Buffer.alloc(32, 4).toString("base64"),
       },
       sender_registry,
@@ -112,6 +135,12 @@ describe("composition", () => {
     expect(() => build_composition({
       env: {
         DATABASE_URL: "postgres://test.invalid/app",
+        CALENDAR_SLOTS_JSON: JSON.stringify([{
+          id: "slot-1",
+          start_iso: "2026-10-01T09:00:00.000Z",
+          end_iso: "2026-10-01T09:30:00.000Z",
+          resource_id: "7",
+        }]),
         WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64: Buffer.alloc(32, 4).toString("base64"),
       },
       sender_registry: { send: async () => undefined },
@@ -144,11 +173,17 @@ describe("composition", () => {
     ).toThrow("sender-invalid");
   });
 
-  it("fails closed when database-backed runtime credentials have no tenant binding", () => {
+  it("fails closed when database-backed mode has no per-tenant sender mapping", () => {
     expect(() =>
       build_composition({
         env: {
           DATABASE_URL: "postgres://test.invalid/app",
+        CALENDAR_SLOTS_JSON: JSON.stringify([{
+          id: "slot-1",
+          start_iso: "2026-10-01T09:00:00.000Z",
+          end_iso: "2026-10-01T09:30:00.000Z",
+          resource_id: "7",
+        }]),
           WHATSAPP_PHONE_NUMBER_ID: "phone-test",
           WHATSAPP_API_TOKEN: "configured-test-token",
           WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64: Buffer.alloc(32, 4).toString("base64"),
@@ -157,11 +192,36 @@ describe("composition", () => {
     ).toThrow("tenant-sender-mapping-required");
   });
 
+  it("requires a bounded durable slot catalog in database-backed mode", () => {
+    expect(() => build_composition({ env: { DATABASE_URL: "postgres://test.invalid/app" } }))
+      .toThrow("CALENDAR_SLOTS_JSON-required");
+    expect(() => build_composition({
+      env: {
+        DATABASE_URL: "postgres://test.invalid/app",
+        CALENDAR_SLOTS_JSON: JSON.stringify([{
+          id: "slot-without-resource",
+          start_iso: "2026-10-01T09:00:00.000Z",
+          end_iso: "2026-10-01T09:30:00.000Z",
+        }]),
+      },
+    })).toThrow("CALENDAR_SLOTS_JSON-resource_id-required");
+    expect(() => build_composition({
+      env: { DATABASE_URL: "postgres://test.invalid/app" },
+      slots: [],
+    })).toThrow("CALENDAR_SLOTS_JSON-required");
+  });
+
   it("requires a production recipient key whenever Postgres is configured", () => {
     expect(() =>
       build_composition({
         env: {
           DATABASE_URL: "postgres://test.invalid/app",
+        CALENDAR_SLOTS_JSON: JSON.stringify([{
+          id: "slot-1",
+          start_iso: "2026-10-01T09:00:00.000Z",
+          end_iso: "2026-10-01T09:30:00.000Z",
+          resource_id: "7",
+        }]),
         },
       }),
     ).toThrow("WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64-required");

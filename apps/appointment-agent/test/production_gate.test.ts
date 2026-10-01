@@ -84,10 +84,14 @@ function fake_client(overrides: Partial<SqlClient> = {}): SqlClient {
 }
 
 const evidence = { verified_at_iso: "2026-09-25T00:00:00.000Z", reference: "restore-drill-001" };
+// Fixed gate clock just after the fixture instant, so freshness assertions are deterministic.
+const NOW_MS = Date.parse("2026-09-26T00:00:00.000Z");
+const gate_options = { now: () => NOW_MS } as const;
 
 describe("database production gate", () => {
   it("passes only with schema, RLS, role, migration, sequence, TLS, timeout, and recovery evidence", async () => {
     const report = await run_database_production_gate(fake_client(), {
+      ...gate_options,
       backup_evidence: evidence,
       restore_evidence: evidence,
       connection_timeout_ms: 5_000,
@@ -102,13 +106,41 @@ describe("database production gate", () => {
   });
 
   it("fails closed when recovery evidence is absent", async () => {
-    const report = await run_database_production_gate(fake_client());
+    const report = await run_database_production_gate(fake_client(), gate_options);
     expect(report.passed).toBe(false);
     expect(report.checks.find((check) => check.name === "backup")?.passed).toBe(false);
   });
 
+  it("fails closed on stale or future recovery evidence", async () => {
+    const stale = {
+      verified_at_iso: "2020-01-01T00:00:00.000Z",
+      reference: "restore-drill-ancient",
+    };
+    const stale_report = await run_database_production_gate(fake_client(), {
+      ...gate_options,
+      backup_evidence: stale,
+      restore_evidence: stale,
+    });
+    expect(stale_report.passed).toBe(false);
+    expect(stale_report.checks.find((check) => check.name === "backup")?.passed).toBe(false);
+    expect(stale_report.checks.find((check) => check.name === "restore")?.passed).toBe(false);
+
+    const future = {
+      verified_at_iso: "2027-06-01T00:00:00.000Z",
+      reference: "restore-drill-future",
+    };
+    const future_report = await run_database_production_gate(fake_client(), {
+      ...gate_options,
+      backup_evidence: future,
+      restore_evidence: future,
+    });
+    expect(future_report.passed).toBe(false);
+    expect(future_report.checks.find((check) => check.name === "backup")?.passed).toBe(false);
+  });
+
   it("fails closed on unsafe pool bounds and incomplete migration state", async () => {
     const unsafe_pool = await run_database_production_gate(fake_client(), {
+      ...gate_options,
       backup_evidence: evidence,
       restore_evidence: evidence,
       max_pool_size: 0,
@@ -130,7 +162,7 @@ describe("database production gate", () => {
         }
         return fake_client().query(sql);
       },
-    }), { backup_evidence: evidence, restore_evidence: evidence });
+    }), { ...gate_options, backup_evidence: evidence, restore_evidence: evidence });
     expect(stale_migration.passed).toBe(false);
     expect(stale_migration.checks.find((check) => check.name === "migration-state")?.passed).toBe(false);
   });

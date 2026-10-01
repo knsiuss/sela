@@ -38,6 +38,12 @@ export interface ReconciliationPassInput {
   batch_limit?: number;
   /** Age after which an orphan fires the repair-age alert. */
   repair_age_threshold_ms?: number;
+  /**
+   * Optional cancellation signal, forwarded to the orphan scanner.
+   * No production scheduler passes one today; the field exists so a
+   * future caller can cancel a stuck pass without changing this boundary.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -47,9 +53,10 @@ export interface ReconciliationPassInput {
  * audited operator command. Raw scanner failures surface as sanitized
  * reconciliation errors with safe codes only.
  *
- * @param input - Scanner, telemetry, clock, and bounds.
+ * @param input - Scanner, telemetry, clock, bounds, and optional abort signal.
  * @returns Counts for logs, gauges, and the repair-age alert.
- * @throws IngressReconciliationError when the scan or classification fails.
+ * @throws IngressReconciliationError when the scan or classification fails,
+ *   or when the pass is aborted via the input signal.
  */
 export async function run_reconciliation_pass(
   input: ReconciliationPassInput,
@@ -61,14 +68,24 @@ export async function run_reconciliation_pass(
   const batch_limit = input.batch_limit ?? DEFAULT_RECONCILIATION_BATCH_LIMIT;
   const threshold_ms = input.repair_age_threshold_ms ?? DEFAULT_REPAIR_AGE_THRESHOLD_MS;
   const now = valid_now(clock());
+  if (input.signal?.aborted) throw new IngressReconciliationError("ingress-pass-aborted");
   let reports: OrphanReport[];
   let scanned = 0;
   try {
-    const triples = await input.scanner.scan_orphans(batch_limit);
+    const triples = await input.scanner.scan_orphans(batch_limit, input.signal);
     scanned = triples.length;
     reports = detect_orphans(triples, { limit: batch_limit });
   } catch (error) {
-    if (error instanceof IngressReconciliationError) throw error;
+    if (error instanceof IngressReconciliationError) {
+      // The scanner sanitizes driver aborts into scan failures; restore the
+      // abort code when the caller cancelled so alerts can tell cancels
+      // apart from real scan failures. The code stays safe either way.
+      if (error.message === "ingress-scan-failed" && input.signal?.aborted) {
+        throw new IngressReconciliationError("ingress-pass-aborted", error);
+      }
+      throw error;
+    }
+    if (is_abort_error(error)) throw new IngressReconciliationError("ingress-pass-aborted", error);
     throw new IngressReconciliationError("ingress-pass-scan-failed", error);
   }
   const summary = summarize_reports(reports, now, threshold_ms, scanned, batch_limit);
@@ -109,6 +126,11 @@ function valid_now(now: Date): Date {
     throw new IngressReconciliationError("ingress-clock-invalid");
   }
   return now;
+}
+
+/** True for DOM AbortError rejections, which carry no safe detail to propagate. */
+function is_abort_error(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 function noop_metrics(): MetricsSink {

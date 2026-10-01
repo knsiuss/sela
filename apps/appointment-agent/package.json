@@ -8,8 +8,11 @@
     "start": "tsx src/start_server.ts",
     "build": "tsc",
     "test": "vitest run",
+    "test:postgres": "vitest run test/postgres_calendar_integration.test.ts",
+    "test:reliability": "vitest run test/reliability.test.ts test/observability.test.ts",
     "db:gate": "tsx src/database_gate_cli.ts",
     "db:restore-rehearsal": "tsx src/restore_rehearsal_cli.ts",
+    "smoke:meta": "tsx src/meta_staging_smoke.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -69,4 +69,66 @@ describe("run_reconciliation_pass", () => {
       IngressReconciliationError,
     );
   });
+
+  it("forwards the abort signal to the scanner", async () => {
+    const controller = new AbortController();
+    const seen: (AbortSignal | undefined)[] = [];
+    const scanner = {
+      scan_orphans: vi.fn(async (_limit: number, signal?: AbortSignal) => {
+        seen.push(signal);
+        return [];
+      }),
+    };
+    await run_reconciliation_pass({ scanner, clock: () => NOW, signal: controller.signal });
+    expect(scanner.scan_orphans).toHaveBeenCalledTimes(1);
+    expect(seen[0]).toBe(controller.signal);
+  });
+
+  it("fails closed on a pre-aborted signal without scanning", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const scanner = { scan_orphans: vi.fn(async () => []) };
+    const error = await run_reconciliation_pass({ scanner, clock: () => NOW, signal: controller.signal })
+      .catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(IngressReconciliationError);
+    expect((error as Error).message).toBe("ingress-pass-aborted");
+    expect(scanner.scan_orphans).not.toHaveBeenCalled();
+  });
+
+  it("maps scanner AbortError rejections to a safe abort code", async () => {
+    const scanner = {
+      scan_orphans: vi.fn(async () => {
+        throw new DOMException("aborted", "AbortError");
+      }),
+    };
+    const error = await run_reconciliation_pass({ scanner, clock: () => NOW })
+      .catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(IngressReconciliationError);
+    expect((error as Error).message).toBe("ingress-pass-aborted");
+  });
+
+  it("restores the abort code when a cancelled scan surfaces as a scan failure", async () => {
+    const controller = new AbortController();
+    const scanner = {
+      scan_orphans: vi.fn(async () => {
+        controller.abort();
+        throw new IngressReconciliationError("ingress-scan-failed");
+      }),
+    };
+    const error = await run_reconciliation_pass({ scanner, clock: () => NOW, signal: controller.signal })
+      .catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(IngressReconciliationError);
+    expect((error as Error).message).toBe("ingress-pass-aborted");
+  });
+});
+
+describe("MetricsRegistry fail-loud contract", () => {
+  it("throws RangeError on invalid values instead of dropping them silently", () => {
+    const metrics = new MetricsRegistry();
+    expect(() => metrics.increment("dropped_total", {}, Number.NaN)).toThrow(RangeError);
+    expect(() => metrics.increment("dropped_total", {}, -1)).toThrow(RangeError);
+    expect(() => metrics.set_gauge("frozen_gauge", Number.POSITIVE_INFINITY)).toThrow(RangeError);
+    expect(() => metrics.observe("skewed_ms", -5)).toThrow(RangeError);
+    expect(metrics.render_prometheus()).not.toContain("dropped_total");
+  });
 });

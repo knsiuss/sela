@@ -119,6 +119,7 @@ describe("postgres atomic ingress store", () => {
       BASE_RECORD.conversation_id,
       BASE_RECORD.message_type,
       BASE_RECORD.button_id,
+      null,
       BASE_RECORD.sender_ref,
       BASE_RECORD.reply_target_ciphertext,
       BASE_RECORD.message_text,
@@ -216,6 +217,33 @@ describe("postgres atomic ingress store", () => {
 
     await expect(store.accept(input())).resolves.toMatchObject({ status: "duplicate" });
     expect(harness.calls[1]?.sql).toContain("im.id IS NOT NULL OR wj.status IN ('completed', 'failed')");
+  });
+
+  it("persists trusted appointment context without adding it to the queue", async () => {
+    const harness = make_harness(successful_handler);
+    const appointment_id = "10000000-0000-4000-8000-000000000001";
+    const store = new PostgresAtomicIngressStore(harness.client);
+
+    await store.accept(input({}, { ...BASE_RECORD, appointment_id }));
+    const inbound_call = harness.calls.find((call) => call.sql.includes("INSERT INTO inbound_messages"));
+    const job_call = harness.calls.find((call) => call.sql.includes("INSERT INTO webhook_jobs"));
+
+    expect(inbound_call?.values).toContain(appointment_id);
+    expect(JSON.stringify(job_call?.values)).not.toContain(appointment_id);
+  });
+
+  it("rejects malformed appointment context before opening a transaction", async () => {
+    const harness = make_harness(successful_handler);
+    const store = new PostgresAtomicIngressStore(harness.client);
+
+    await expect(store.accept(input({}, {
+      ...BASE_RECORD,
+      appointment_id: "not-a-uuid",
+    }))).rejects.toMatchObject({
+      name: "AtomicIngressStoreError",
+      message: "atomic-ingress-appointment_id-invalid",
+    });
+    expect(harness.transaction_commands).toEqual([]);
   });
 
   it("rolls back when the claim write fails", async () => {

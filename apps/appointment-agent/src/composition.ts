@@ -1,6 +1,7 @@
 /** Runtime composition for the tenant-aware HTTP server and worker. */
 
 import type { Server as NodeHttpServer } from "node:http";
+import { z } from "zod";
 import { InMemoryMessageDedupe } from "./ingress/dedupe.js";
 import {
   InMemoryInboundMessageStore,
@@ -22,7 +23,14 @@ import {
 } from "./ingress/postgres_atomic_ingress.js";
 import { PostgresWebhookJobQueue } from "./queue/postgres_outbox_queue.js";
 import { PgSqlClient, load_pg_config } from "./persistence/pg_client.js";
-import type { SqlClient } from "./persistence/sql_client.js";
+import type { SqlClient, TransactionalSqlClient } from "./persistence/sql_client.js";
+import {
+  InMemoryAppointmentRepository,
+  PostgresAppointmentRepository,
+  type AppointmentRepository,
+} from "./appointments/appointment_repository.js";
+import { PostgresCalendarWriter } from "./calendar/postgres_calendar.js";
+import { time_slot_schema } from "./calendar/calendar_models.js";
 import { SlotServiceAdapter } from "./tools/slot_service_adapter.js";
 import {
   InMemoryRescheduleSessionStore,
@@ -30,6 +38,11 @@ import {
 } from "./reschedule/session_store.js";
 import { PostgresRescheduleSessionStore } from "./reschedule/postgres_session_store.js";
 import { RescheduleTurnProcessor } from "./reschedule/turn_processor.js";
+import {
+  InMemoryRescheduleAudit,
+  PostgresRescheduleAudit,
+  type RescheduleAudit,
+} from "./reschedule/audit.js";
 import type { CalendarPort } from "./tools/calendar.js";
 import type { TimeSlot } from "./state.js";
 import { build_graph } from "./graph.js";
@@ -49,16 +62,33 @@ import {
 } from "./worker/loop.js";
 import { build_runtime_sender, resolve_runtime_tenant_id } from "./outbound/runtime_sender.js";
 import {
+  InMemoryOutboundLedgerStore,
+  type OutboundLedgerStore,
+} from "./outbound/outbound_ledger.js";
+import { PostgresOutboundLedgerStore } from "./outbound/postgres_outbound_ledger.js";
+import { DurableOutboundSenderRegistry } from "./outbound/durable_outbound_registry.js";
+import {
+  InMemoryTenantRateLimiter,
+  PostgresTenantRateLimiter,
+  type TenantRateLimiter,
+} from "./rate_limit/tenant_rate_limiter.js";
+import { MetricsRegistry } from "./observability/metrics.js";
+import { handle_operator_action, type OperatorApiOptions } from "./http/operator_api.js";
+import {
   is_multi_tenant_sender_registry,
   SingleTenantOutboundSenderRegistry,
 } from "./outbound/sender_registry.js";
 import {
-  AesGcmRecipientCipher,
   EphemeralRecipientCipher,
-  parse_recipient_cipher_key,
   RECIPIENT_CIPHER_KEY_ENV,
   type RecipientCipher,
 } from "./security/recipient_cipher.js";
+import {
+  parse_recipient_key_ring,
+  RECIPIENT_KEY_RING_ENV,
+} from "./security/recipient_key_ring.js";
+import { RotatingRecipientCipher } from "./security/rotating_recipient_cipher.js";
+import type { SecretAccessSink } from "./security/secret_manager.js";
 
 /** Clear failure when runtime persistence is not configured safely. */
 export class CompositionConfigurationError extends Error {
@@ -81,8 +111,17 @@ export interface CompositionOptions {
   sender_registry?: OutboundSenderRegistry;
   calendar_factory?: (tenant_id: string) => CalendarPort;
   graph_factory?: GraphFactory;
+  appointment_repository?: AppointmentRepository;
+  reschedule_audit?: RescheduleAudit;
   recipient_cipher?: RecipientCipher;
   slots?: readonly TimeSlot[];
+  rate_limiter?: TenantRateLimiter;
+  outbound_ledger?: OutboundLedgerStore;
+  metrics?: MetricsRegistry;
+  /** Optional sink for PII-free secret access audit events. */
+  secret_access_sink?: SecretAccessSink;
+  outbound_provider?: string;
+  operator_api_options?: OperatorApiOptions;
 }
 
 /** Running resources and lifecycle methods for one application instance. */
@@ -97,9 +136,15 @@ export interface AppComposition {
   job_claimer: JobClaimer;
   lifecycle: JobLifecycleStore;
   reschedule_session_store: RescheduleSessionStore;
+  appointment_repository: AppointmentRepository;
   graph_factory: GraphFactory;
-  /** Tenant-aware sender boundary used by the worker. */
+  rate_limiter: TenantRateLimiter;
+  outbound_ledger: OutboundLedgerStore;
+  metrics: MetricsRegistry;
+  /** Resolved provider registry before the durable delivery wrapper. */
   sender_registry: OutboundSenderRegistry;
+  /** Durable registry actually used by worker delivery. */
+  durable_sender_registry: DurableOutboundSenderRegistry;
   /** Tenant admission scope; undefined only for an explicit multi-tenant registry. */
   worker_tenant_id?: string;
   server?: NodeHttpServer;
@@ -132,6 +177,10 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
   if (has_database_url && use_in_memory) {
     throw new CompositionConfigurationError("DATABASE_URL and USE_IN_MEMORY=true are mutually exclusive");
   }
+  const configured_slots = validate_calendar_slots(
+    options.slots ?? parse_calendar_slots(env["CALENDAR_SLOTS_JSON"], has_database_url),
+    has_database_url,
+  );
   const recipient_cipher = resolve_recipient_cipher(
     env,
     has_database_url,
@@ -140,6 +189,14 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
   const sql_client = has_database_url
     ? new PgSqlClient({ ...load_pg_config(env), connection_string: database_url })
     : undefined;
+  const transactional_sql_client = sql_client as TransactionalSqlClient | undefined;
+  const metrics = options.metrics ?? new MetricsRegistry();
+  const rate_limiter = options.rate_limiter ?? (sql_client === undefined
+    ? new InMemoryTenantRateLimiter()
+    : new PostgresTenantRateLimiter(sql_client));
+  const outbound_ledger = options.outbound_ledger ?? (transactional_sql_client === undefined
+    ? new InMemoryOutboundLedgerStore()
+    : new PostgresOutboundLedgerStore(transactional_sql_client));
   const retention_days = parse_retention_days(
     env["INBOUND_MESSAGE_RETENTION_DAYS"] ?? env["INBOUND_RETENTION_DAYS"],
   );
@@ -156,6 +213,14 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
   const reschedule_session_store: RescheduleSessionStore = sql_client === undefined
     ? new InMemoryRescheduleSessionStore()
     : new PostgresRescheduleSessionStore(sql_client);
+  const appointment_repository = options.appointment_repository
+    ?? (sql_client === undefined
+      ? new InMemoryAppointmentRepository()
+      : new PostgresAppointmentRepository(sql_client));
+  const reschedule_audit = options.reschedule_audit
+    ?? (sql_client === undefined
+      ? new InMemoryRescheduleAudit()
+      : new PostgresRescheduleAudit(sql_client));
   const in_memory_queue = sql_client === undefined ? new InMemoryWebhookQueue() : undefined;
   const job_queue: WebhookJobQueue = in_memory_queue ?? new PostgresWebhookJobQueue(sql_client!);
   const tenant_resolver = sql_client === undefined
@@ -172,7 +237,13 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
   const calendar_factory = options.calendar_factory ?? ((tenant_id: string): CalendarPort => {
     const cached = default_calendars.get(tenant_id);
     if (cached !== undefined) return cached;
-    const calendar = new SlotServiceAdapter({ tenant_id, slots: options.slots ?? [] });
+    const calendar = transactional_sql_client === undefined
+      ? new SlotServiceAdapter({ tenant_id, slots: configured_slots })
+      : new PostgresCalendarWriter({
+          sql_client: transactional_sql_client,
+          tenant_id,
+          slots: configured_slots,
+        });
     default_calendars.set(tenant_id, calendar);
     return calendar;
   });
@@ -187,10 +258,21 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
   let server: NodeHttpServer | undefined;
   let worker_controller: AbortController | undefined;
   let worker_promise: Promise<WorkerLoopCounters> | undefined;
-  const sender_registry = resolve_outbound_sender(options, env, has_database_url);
-  const worker_tenant_id = resolve_worker_tenant_scope(options, env, has_database_url);
+  const sender_registry = resolve_outbound_sender(options, env, has_database_url, metrics);
+  const rate_limit_config = resolve_rate_limit_config(env);
+  const durable_sender_registry = new DurableOutboundSenderRegistry({
+    registry: sender_registry,
+    ledger: outbound_ledger,
+    provider: options.outbound_provider ?? env["OUTBOUND_PROVIDER"] ?? "whatsapp",
+    rate_limiter,
+    outbound_limit: rate_limit_config.outbound_limit,
+    outbound_window_seconds: rate_limit_config.outbound_window_seconds,
+    allow_synthetic_ack: !has_database_url,
+    metrics,
+  });
+  const worker_tenant_id = resolve_worker_tenant_scope(options, env, has_database_url, sender_registry);
   const deliver = async (tenant_id: string, drafts: readonly OutboundDraft[]): Promise<void> => {
-    for (const draft of drafts) await sender_registry.send(tenant_id, draft);
+    for (const draft of drafts) await durable_sender_registry.send(tenant_id, draft);
   };
 
   const process_job_fn = (job: Parameters<typeof process_job>[0]["job"]): Promise<OutboundDraft[]> => {
@@ -198,6 +280,8 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
     const calendar = calendar_factory(tenant_id);
     const turn_processor = new RescheduleTurnProcessor({
       session_store: reschedule_session_store,
+      appointment_repository,
+      reschedule_audit,
       calendar,
       graph_runner: graph_factory(calendar),
     });
@@ -209,6 +293,7 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
       turn_processor,
       lifecycle,
       deliver,
+      metrics,
       max_attempts,
     });
   };
@@ -224,8 +309,13 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
     job_claimer,
     lifecycle,
     reschedule_session_store,
+    appointment_repository,
     graph_factory,
+    rate_limiter,
+    outbound_ledger,
+    metrics,
     sender_registry,
+    durable_sender_registry,
     worker_tenant_id,
     start_server: async () => {
       if (server !== undefined) return;
@@ -238,6 +328,20 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
         inbound_store,
         recipient_cipher,
         inbound_retention_days: retention_days,
+        rate_limiter,
+        outbound_ledger,
+        metrics,
+        ...(options.operator_api_options === undefined ? {} : {
+          operator_handler: handle_operator_action,
+          operator_api_options: {
+            ...options.operator_api_options,
+            rate_limiter: options.operator_api_options.rate_limiter ?? rate_limiter,
+            operator_limit: options.operator_api_options.operator_limit ?? rate_limit_config.operator_limit,
+            operator_window_seconds: options.operator_api_options.operator_window_seconds ?? rate_limit_config.operator_window_seconds,
+          },
+        }),
+        inbound_rate_limit: rate_limit_config.webhook_limit,
+        inbound_rate_window_seconds: rate_limit_config.webhook_window_seconds,
       });
     },
     start_worker: () => {
@@ -251,6 +355,7 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
         batch_size,
         signal: worker_controller.signal,
         on_error: (error, job) => {
+          metrics.increment("worker_loop_errors_total", { error: error instanceof Error ? error.name : "UnknownError" });
           console.error(JSON.stringify({
             event: "worker_loop_error",
             job_id: job?.id,
@@ -310,6 +415,7 @@ function resolve_outbound_sender(
   options: CompositionOptions,
   env: Record<string, string | undefined>,
   is_database_backed: boolean,
+  metrics: MetricsRegistry,
 ): OutboundSenderRegistry {
   if (options.sender_registry !== undefined) {
     if (options.sender !== undefined) {
@@ -327,7 +433,10 @@ function resolve_outbound_sender(
     const tenant_id = resolve_runtime_tenant_id(env, is_database_backed);
     return new SingleTenantOutboundSenderRegistry(tenant_id, options.sender);
   }
-  return build_runtime_sender(env);
+  return build_runtime_sender(env, {
+    secret_access_sink: options.secret_access_sink,
+    metrics,
+  });
 }
 
 function is_outbound_sender_registry(value: unknown): value is OutboundSenderRegistry {
@@ -341,20 +450,21 @@ function is_outbound_sender_port(value: unknown): value is OutboundSenderPort {
 /**
  * Resolve the worker's queue admission scope.
  *
- * An injected multi-tenant registry is an explicit deployment contract and may
- * use the global claimer. Without that contract, the worker is bound to the
- * same single tenant as the environment-built sender.
+ * An injected or secret-backed multi-tenant registry is an explicit
+ * deployment contract and may use the global claimer. Without that contract,
+ * the worker is bound to the same single tenant as the injected sender.
  */
 function resolve_worker_tenant_scope(
   options: CompositionOptions,
   env: Record<string, string | undefined>,
   is_database_backed: boolean,
+  sender_registry: OutboundSenderRegistry,
 ): string | undefined {
+  if (is_multi_tenant_sender_registry(sender_registry)) return undefined;
   const configured_tenant_id = env["TENANT_ID"]?.trim();
   if (options.sender_registry === undefined || (configured_tenant_id !== undefined && configured_tenant_id !== "")) {
     return resolve_runtime_tenant_id(env, is_database_backed);
   }
-  if (is_multi_tenant_sender_registry(options.sender_registry)) return undefined;
   throw new CompositionConfigurationError("multi-tenant-registry-required");
 }
 
@@ -373,22 +483,79 @@ function resolve_recipient_cipher(
 ): RecipientCipher {
   if (injected_cipher !== undefined) return injected_cipher;
   if (is_database_backed) {
-    const encoded_key = env[RECIPIENT_CIPHER_KEY_ENV];
-    if (encoded_key === undefined || encoded_key === "") {
+    if (
+      (env[RECIPIENT_CIPHER_KEY_ENV] === undefined || env[RECIPIENT_CIPHER_KEY_ENV] === "") &&
+      (env[RECIPIENT_KEY_RING_ENV] === undefined || env[RECIPIENT_KEY_RING_ENV] === "")
+    ) {
       throw new CompositionConfigurationError(`${RECIPIENT_CIPHER_KEY_ENV}-required`);
     }
-    const key = parse_recipient_cipher_key(encoded_key);
+    const ring = parse_recipient_key_ring(env);
     try {
-      return new AesGcmRecipientCipher(key);
+      return new RotatingRecipientCipher(ring.keys, ring.active_key_id);
     } finally {
-      key.fill(0);
+      for (const key of ring.keys.values()) key.fill(0);
     }
   }
   return new EphemeralRecipientCipher();
 }
 
+function parse_calendar_slots(value: string | undefined, is_database_backed: boolean): TimeSlot[] {
+  if (value === undefined || value.trim() === "") {
+    if (is_database_backed) throw new CompositionConfigurationError("CALENDAR_SLOTS_JSON-required");
+    return [];
+  }
+  if (value.length > 65_536) throw new CompositionConfigurationError("CALENDAR_SLOTS_JSON-invalid");
+  try {
+    return z.array(time_slot_schema).max(500).parse(JSON.parse(value));
+  } catch {
+    throw new CompositionConfigurationError("CALENDAR_SLOTS_JSON-invalid");
+  }
+}
+
+function validate_calendar_slots(slots: readonly TimeSlot[], is_database_backed: boolean): TimeSlot[] {
+  let parsed: TimeSlot[];
+  try {
+    parsed = z.array(time_slot_schema).max(500).parse(slots);
+  } catch {
+    throw new CompositionConfigurationError("CALENDAR_SLOTS_JSON-invalid");
+  }
+  if (is_database_backed && parsed.length === 0) {
+    throw new CompositionConfigurationError("CALENDAR_SLOTS_JSON-required");
+  }
+  if (is_database_backed && parsed.some((slot) => slot.resource_id === undefined)) {
+    throw new CompositionConfigurationError("CALENDAR_SLOTS_JSON-resource_id-required");
+  }
+  return parsed;
+}
+
 function parse_retention_days(value: string | undefined): number {
   return parse_positive_integer(value ?? String(DEFAULT_INBOUND_RETENTION_DAYS), "INBOUND_MESSAGE_RETENTION_DAYS");
+}
+
+interface RateLimitConfig {
+  webhook_limit: number;
+  webhook_window_seconds: number;
+  outbound_limit: number;
+  outbound_window_seconds: number;
+  operator_limit: number;
+  operator_window_seconds: number;
+}
+
+function resolve_rate_limit_config(env: Record<string, string | undefined>): RateLimitConfig {
+  return {
+    webhook_limit: bounded_setting(env["RATE_LIMIT_WEBHOOK_MAX_REQUESTS"] ?? "120", "RATE_LIMIT_WEBHOOK_MAX_REQUESTS", 100_000),
+    webhook_window_seconds: bounded_setting(env["RATE_LIMIT_WEBHOOK_WINDOW_SECONDS"] ?? "60", "RATE_LIMIT_WEBHOOK_WINDOW_SECONDS", 86_400),
+    outbound_limit: bounded_setting(env["RATE_LIMIT_OUTBOUND_MAX_REQUESTS"] ?? "60", "RATE_LIMIT_OUTBOUND_MAX_REQUESTS", 100_000),
+    outbound_window_seconds: bounded_setting(env["RATE_LIMIT_OUTBOUND_WINDOW_SECONDS"] ?? "60", "RATE_LIMIT_OUTBOUND_WINDOW_SECONDS", 86_400),
+    operator_limit: bounded_setting(env["RATE_LIMIT_OPERATOR_MAX_REQUESTS"] ?? "60", "RATE_LIMIT_OPERATOR_MAX_REQUESTS", 100_000),
+    operator_window_seconds: bounded_setting(env["RATE_LIMIT_OPERATOR_WINDOW_SECONDS"] ?? "60", "RATE_LIMIT_OPERATOR_WINDOW_SECONDS", 86_400),
+  };
+}
+
+function bounded_setting(value: string, field_name: string, maximum: number): number {
+  const parsed = parse_positive_integer(value, field_name);
+  if (parsed > maximum) throw new CompositionConfigurationError(`${field_name}-invalid`);
+  return parsed;
 }
 
 function parse_positive_integer(value: string, field_name: string): number {
