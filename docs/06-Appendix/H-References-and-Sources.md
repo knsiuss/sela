@@ -12,6 +12,8 @@
 - WA pricing — https://developers.facebook.com/documentation/business-messaging/whatsapp/pricing [S]
 - WA templates — https://developers.facebook.com/documentation/business-messaging/whatsapp/templates/template-categorization [S]
 - WA webhooks endpoint — https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/create-webhook-endpoint/ [S]
+- WA webhook payloads/retries — https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/overview [S]
+- WA throughput/error 130429 — https://developers.facebook.com/documentation/business-messaging/whatsapp/throughput [Q]
 - WA get-started — https://developers.facebook.com/documentation/business-messaging/whatsapp/get-started [B]
 - GCal quota/freebusy/push/auth — https://developers.google.com/workspace/calendar/api/guides/quota [B]
 - Graph getSchedule — https://learn.microsoft.com/en-us/graph/api/calendar-getschedule?view=graph-rest-1.0 [B]

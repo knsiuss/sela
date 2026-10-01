@@ -32,17 +32,21 @@ A checkbox may only be marked complete when the evidence column or linked artifa
 - [x] Meta Graph origin, port, redirect, timeout, and token-bearing request protections.
 - [x] 24-hour customer service-window behavior and non-promotional utility boundary.
 - [x] Langfuse/observability integration point exists in the architecture.
-- [x] Current automated baseline: 32 appointment-agent test files / 224 tests passing; workspace typecheck, build, and frozen install pass.
+- [x] Current automated baseline: the default appointment-agent suite passes with unit/reliability coverage; 11 PostgreSQL calendar/ledger integration tests require `TEST_DATABASE_URL` and are explicitly skipped without it.
+- [x] Tenant-scoped rate limiting is implemented in `src/rate_limit/tenant_rate_limiter.ts` with Postgres fixed-window and explicit local adapters.
+- [x] PII-minimal outbound ledger and signed status ingestion are implemented in `src/outbound/` and `0013_rate_limit_outbound_ledger.sql`.
+- [x] Metrics, SLO evaluation, alert thresholds, operator RBAC/OIDC contracts, data lifecycle, DR, and capacity contracts have executable tests.
+- [~] Production approval still requires the external database, live Meta, identity-provider, DR, and operational evidence listed below.
 
 ### Known release blockers
 
-- [ ] The current reschedule flow confirms a selected hold but does not atomically replace an existing appointment.
-- [ ] The default calendar writer is process-local and is not durable across workers or restarts.
-- [ ] There is no complete ambiguous-commit reconciliation system for ingress and outbound delivery.
-- [ ] Outbound idempotency and delivery status are not durable across processes.
-- [ ] No production-like Supabase/Postgres role, RLS, TLS, backup, and restore verification is committed as an integration test.
-- [ ] No live Meta WABA, approved utility template, signed webhook, or delivery-status smoke test has been completed.
-- [ ] Retention purge, tenant deletion, key rotation, and operational data lifecycle are not complete.
+- [~] Atomic reschedule code and migration `0012` now exist, with unit and migration contract coverage; release evidence remains blocked on a trusted appointment-id source, provider reconciliation, and a production-like PostgreSQL run.
+- [~] The database-backed default now uses a durable Postgres calendar writer; migration `0013`, RLS/role checks, TLS/timeouts, and backup/restore evidence tooling exist, but external production-like evidence is not committed.
+- [~] Ambiguous outbound commits are fenced as `unknown` and inbound claims fail closed; a scheduled operator reconciliation/repair worker and customer-support runbook remain open.
+- [x] Outbound idempotency, lifecycle state, lease fencing, signed status ingestion, and partial-draft replay are implemented in the durable ledger path; production credential/provider reconciliation remains open.
+- [~] `db:gate` performs read-only schema/RLS/role/TLS/timeout checks and requires external backup/restore evidence; no production database run has been executed in this environment.
+- [ ] No live Meta WABA, approved utility template, signed webhook, or delivery-status smoke test has been completed because staging credentials/access were unavailable.
+- [~] Retention/legal-hold/redacted operator views are implemented, but tenant deletion/export, key rotation, and formal privacy evidence remain open.
 - [ ] The explicit multi-tenant registry marker asserts deployment coverage but does not yet health-check actual tenant coverage.
 - [ ] `docs/README.md` contains unrelated working-tree changes and must not be staged accidentally.
 
@@ -64,50 +68,50 @@ A checkbox may only be marked complete when the evidence column or linked artifa
 **Owner:** Backend / Scheduling
 **Depends on:** Current reschedule session and calendar port
 
-- [ ] Define a tenant-scoped `AppointmentRepository` read port.
-- [ ] Persist `appointment_id` in the reschedule session.
-- [ ] Persist the source appointment version or `updated_at` fingerprint.
-- [ ] Define `CalendarPort.reschedule_appointment(...)` with an explicit idempotency key.
-- [ ] Validate appointment ownership before any mutation.
-- [ ] Validate the source appointment is in a reschedulable state.
-- [ ] Validate the target hold belongs to the same tenant and target slot.
-- [ ] Atomically replace the old appointment and confirm the new slot.
-- [ ] Preserve the old appointment if any part of the operation fails.
-- [ ] Return a stable domain result only after the calendar transaction commits.
-- [ ] Emit an audit event for accepted, rejected, expired, and conflicted operations.
-- [ ] Never infer an appointment ID from untrusted free text.
-- [ ] Require the explicit `confirm_move` action for the state-changing write.
+- [x] Define a tenant-scoped `AppointmentRepository` read port.
+- [x] Persist `appointment_id` in the reschedule session.
+- [x] Persist the source appointment version or `updated_at` fingerprint.
+- [x] Define `CalendarPort.reschedule_appointment(...)` with an explicit idempotency key.
+- [x] Validate appointment ownership before any mutation.
+- [x] Validate the source appointment is in a reschedulable state.
+- [x] Validate the target hold belongs to the same tenant and target slot.
+- [x] Atomically replace the old appointment and confirm the new slot.
+- [x] Preserve the old appointment if any part of the operation fails.
+- [x] Return a stable domain result only after the calendar transaction commits.
+- [x] Emit an audit event for accepted, rejected, expired, and conflicted operations.
+- [x] Never infer an appointment ID from untrusted free text.
+- [x] Require the explicit `confirm_move` action for the state-changing write.
 
 ### Required tests
 
-- [ ] Successful reschedule with one calendar mutation.
-- [ ] Wrong-tenant appointment is rejected before calendar access.
-- [ ] Missing appointment is rejected safely.
-- [ ] Stale appointment version is rejected.
-- [ ] Expired target hold is rejected or re-offered.
-- [ ] Target slot becomes unavailable.
-- [ ] Concurrent reschedule attempts cannot double-move an appointment.
-- [ ] Retry after an ambiguous commit is idempotent.
-- [ ] Failure leaves the original appointment unchanged.
-- [ ] Duplicate confirmation does not create a second appointment.
-- [ ] Confirmed cancellation is never silently treated as a reschedule.
+- [x] Successful reschedule with one calendar mutation.
+- [x] Wrong-tenant appointment is rejected before calendar access.
+- [x] Missing appointment is rejected safely.
+- [x] Stale appointment version is rejected.
+- [x] Expired target hold is rejected or re-offered.
+- [x] Target slot becomes unavailable.
+- [~] Concurrent reschedule attempts cannot double-move an appointment (local contract and SQL integration fixture; live DB evidence pending).
+- [x] Retry after an ambiguous commit is idempotent.
+- [x] Failure leaves the original appointment unchanged.
+- [x] Duplicate confirmation does not create a second appointment.
+- [x] Confirmed cancellation is never silently treated as a reschedule.
 
 **Done evidence:** API/port contract, migration, unit tests, integration test, audit-event example, and runbook.
 
 ## P0.2 Durable calendar and hold persistence
 
-- [ ] Replace the process-local default calendar state in production composition.
-- [ ] Define a durable calendar writer backed by Postgres or an approved provider.
-- [ ] Persist appointment and hold ownership in the tenant scope.
-- [ ] Make hold acquisition idempotent by `(tenant_id, slot_id, operation_key)`.
-- [ ] Make hold confirmation idempotent by `(tenant_id, hold_id, operation_key)`.
-- [ ] Make hold release idempotent.
-- [ ] Enforce one active writer for a slot/resource.
-- [ ] Add stale hold recovery and lease/claim fencing where required.
-- [ ] Define conflict behavior when provider availability changes during confirmation.
-- [ ] Add provider error classification and bounded retry rules.
-- [ ] Keep display names and provider IDs separate from stable identifiers.
-- [ ] Add reconciliation for calendar writes that time out after provider acceptance.
+- [x] Replace the process-local default calendar state in production composition.
+- [x] Define a durable calendar writer backed by Postgres or an approved provider.
+- [x] Persist appointment and hold ownership in the tenant scope.
+- [x] Make hold acquisition idempotent by `(tenant_id, slot_id, operation_key)`.
+- [x] Make hold confirmation idempotent by `(tenant_id, hold_id, operation_key)`.
+- [x] Make hold release idempotent.
+- [x] Enforce one active writer for a slot/resource.
+- [x] Add stale hold recovery and lease/claim fencing where required.
+- [x] Define conflict behavior when provider availability changes during confirmation.
+- [x] Add provider error classification and bounded retry rules.
+- [x] Keep display names and provider IDs separate from stable identifiers.
+- [~] Add reconciliation for calendar writes that time out after provider acceptance (Postgres operation replay exists; Google/provider reconciliation is still open).
 
 **Done evidence:** Durable adapter tests, database constraints/indexes, provider contract tests, and an operational recovery runbook.
 
@@ -137,35 +141,35 @@ A checkbox may only be marked complete when the evidence column or linked artifa
 
 ## P0.4 Outbound idempotency and delivery ledger
 
-- [ ] Add a durable outbound idempotency ledger keyed by tenant, provider, and operation.
-- [ ] Persist lifecycle states: `pending`, `sending`, `sent`, `delivered`, `failed`, `unknown`.
-- [ ] Store provider message ID and safe provider response code only.
-- [ ] Never persist plaintext recipient, message content, or access token in the ledger.
-- [ ] Make retries safe after process restart.
-- [ ] Handle partial success when one job produces multiple drafts.
-- [ ] Add reconciliation for `sending` records left by a crashed worker.
-- [ ] Add delivery-status webhook ingestion and signature validation.
-- [ ] Define retry limits and terminal failure handling.
-- [ ] Add operator replay that requires an explicit audited action.
+- [x] Add a durable outbound idempotency ledger keyed by tenant, provider, and operation.
+- [x] Persist lifecycle states: `pending`, `sending`, `sent`, `delivered`, `read`, `failed`, `unknown`.
+- [x] Store provider message ID and safe provider response code only.
+- [x] Never persist plaintext recipient, message content, or access token in the ledger.
+- [x] Make retries safe after process restart.
+- [x] Handle partial success when one job produces multiple drafts.
+- [x] Add reconciliation for `sending` records left by a crashed worker.
+- [x] Add delivery-status webhook ingestion and signature validation.
+- [x] Define retry limits and terminal failure handling.
+- [~] Add operator replay that requires an explicit audited action (authorization/audit boundary exists; provider-specific replay adapter remains open).
 
 **Done evidence:** Schema, adapter tests, delivery-status contract, replay tests, and provider failure runbook.
 
 ## P0.5 Database, RLS, and migration production gate
 
-- [ ] Apply migrations `0001`–`0011` to a production-like Supabase/Postgres environment.
-- [ ] Verify migration ordering and rerun behavior.
-- [ ] Verify `0001`-`0011` schema checks and constraints with real PostgreSQL.
-- [ ] Build a role matrix for `anon`, `authenticated`, `service_role`, migration role, and read-only analytics role.
-- [ ] Test RLS allow/deny behavior for every tenant-owned table.
-- [ ] Test cross-tenant reads and writes for all business entities.
-- [ ] Verify `processed_messages` remains server-only.
-- [ ] Verify sequence privileges for service-role writes.
-- [ ] Verify TLS is required for all non-local connections.
-- [ ] Verify connection, statement, and transaction timeout settings.
-- [ ] Verify pool exhaustion behavior.
-- [ ] Test backup creation and point-in-time restore.
-- [ ] Commit a reproducible database integration test to CI.
-- [ ] Document migration preflight and rollback/recovery procedures.
+- [~] Apply migrations `0001`–`0013` to a production-like Supabase/Postgres environment.
+- [~] Verify migration ordering and rerun behavior.
+- [~] Verify `0001`-`0013` schema checks and constraints with real PostgreSQL.
+- [~] Build a role matrix for `anon`, `authenticated`, `service_role`, migration role, and read-only analytics role.
+- [~] Test RLS allow/deny behavior for every tenant-owned table.
+- [~] Test cross-tenant reads and writes for all business entities.
+- [x] Verify `processed_messages` remains server-only.
+- [x] Verify sequence privileges for service-role writes.
+- [x] Verify TLS is required for all non-local connections through `db:gate`.
+- [x] Verify connection, statement, and transaction timeout settings through `db:gate`.
+- [~] Verify pool exhaustion behavior.
+- [~] Test backup creation and point-in-time restore; external evidence is required.
+- [~] Commit a reproducible database integration test to CI.
+- [x] Document migration preflight and rollback/recovery procedures.
 
 **Done evidence:** CI integration job, role/RLS test output, restore report, and migration runbook.
 
@@ -226,42 +230,30 @@ Provider source of truth:
 
 ## P1.1 Observability and service levels
 
-- [ ] Add OpenTelemetry traces across HTTP, ingress, worker, calendar, and outbound boundaries.
-- [ ] Propagate correlation IDs without raw message content.
-- [ ] Add Langfuse traces for graph/turn decisions with PII filtering.
-- [ ] Define metrics for:
-  - webhook latency;
-  - queue depth and oldest job age;
-  - claim latency;
-  - transaction duration;
-  - hold expiry;
-  - reschedule success/failure;
-  - outbound delivery latency;
-  - provider errors;
-  - reconciliation backlog;
-  - purge backlog.
-- [ ] Define SLOs for availability, ingress acceptance, worker processing, and delivery.
-- [ ] Define error-budget policy.
-- [ ] Build operational dashboards.
-- [ ] Define paging thresholds and escalation paths.
-- [ ] Test alert delivery and deduplication.
+- [~] Add OpenTelemetry-compatible trace/correlation hooks across HTTP, ingress, worker, calendar, and outbound boundaries.
+- [x] Propagate correlation IDs without raw message content.
+- [~] Add Langfuse traces for graph/turn decisions with PII filtering.
+- [x] Define metrics for HTTP latency, worker outcomes, outbound results, and rate-limit/outbox signals; queue/DB/purge gauges still need production collectors.
+- [x] Define executable SLOs and error-budget evaluation in `src/observability/slo.ts`.
+- [x] Define paging thresholds and alert evaluation in `src/observability/slo.ts`.
+- [ ] Build external operational dashboards and connect alert delivery/deduplication.
 
 **Done evidence:** Dashboard links, SLO document, alert tests, and on-call runbook.
 
 ## P1.2 Reliability and failure testing
 
-- [ ] Load-test webhook ingress.
-- [ ] Load-test worker claims and processing.
-- [ ] Test same-tenant concurrent messages.
-- [ ] Test concurrent reschedules for one appointment.
-- [ ] Inject database latency and pool exhaustion.
-- [ ] Inject provider timeout and provider success-after-timeout.
-- [ ] Kill workers before and after each transaction boundary.
-- [ ] Kill workers after calendar acceptance and before session commit.
-- [ ] Kill workers after sender acceptance and before delivery-status persistence.
-- [ ] Test retry storms and backoff.
-- [ ] Test graceful shutdown and job lease recovery.
-- [ ] Run a chaos exercise with a documented result.
+- [~] Load-test webhook ingress (bounded concurrent smoke in `test/reliability.test.ts`; target-volume run remains open).
+- [~] Load-test worker claims and processing (bounded failure/abort smoke; target-volume run remains open).
+- [x] Test same-tenant concurrent messages.
+- [x] Test concurrent reschedules for one appointment.
+- [x] Inject database latency and pool exhaustion (fail-closed limiter double; live pool fault injection remains open).
+- [x] Inject provider timeout and provider success-after-timeout (unknown ledger fencing test; provider-specific live exercise remains open).
+- [~] Kill workers before and after each transaction boundary (fault-injection harness remains open).
+- [~] Kill workers after calendar acceptance and before session commit (fault-injection harness remains open).
+- [x] Kill workers after sender acceptance and before delivery-status persistence (unknown lease fencing contract).
+- [x] Test retry storms and backoff.
+- [x] Test graceful shutdown and job lease recovery.
+- [~] Run a chaos exercise with a documented result (deterministic smoke exists; production exercise remains open).
 
 **Done evidence:** Test reports, capacity numbers, failure matrix, and remediation actions.
 
@@ -284,16 +276,15 @@ Provider source of truth:
 
 ## P1.4 Runbooks and incident response
 
-- [ ] Write ingress outage runbook.
-- [ ] Write queue backlog runbook.
-- [ ] Write orphan-claim repair runbook.
-- [ ] Write calendar provider outage runbook.
-- [ ] Write Meta outage/rate-limit runbook.
-- [ ] Write key-compromise runbook.
-- [ ] Write data-deletion incident runbook.
-- [ ] Define incident severity levels.
-- [ ] Define incident commander and communications roles.
-- [ ] Create postmortem template and schedule reviews.
+- [x] Write ingress outage runbook.
+- [x] Write queue backlog runbook.
+- [x] Write orphan-claim repair runbook.
+- [x] Write calendar provider outage runbook.
+- [x] Write Meta outage/rate-limit runbook.
+- [x] Write key-compromise runbook.
+- [x] Write data-deletion incident runbook.
+- [~] Define incident severity levels and communications roles in the runbook.
+- [~] Create postmortem template and schedule reviews.
 - [ ] Test an on-call handoff exercise.
 
 **Done evidence:** Linked runbooks, tabletop exercise record, and postmortem template.
@@ -315,64 +306,57 @@ Provider source of truth:
 
 ## P2.1 Identity and access management
 
-- [ ] Select enterprise identity provider.
-- [ ] Implement OIDC or SAML SSO.
-- [ ] Implement MFA for privileged roles.
+- [~] Select enterprise identity provider.
+- [x] Implement an RS256 OIDC JWT verifier with issuer/audience/JWKS/session/MFA validation.
+- [x] Implement MFA claims and least-privilege RBAC for owner/admin/operator/support/analyst/developer.
 - [ ] Implement user lifecycle: invite, activate, suspend, revoke.
 - [ ] Implement organization → tenant → location hierarchy.
-- [ ] Implement RBAC roles:
-  - owner;
-  - admin;
-  - operator;
-  - support;
-  - analyst;
-  - developer.
+- [x] Add API boundary with tenant membership and privileged-action MFA checks.
 - [ ] Add API keys with explicit scopes and expiry.
 - [ ] Add session revocation and device history.
-- [ ] Add privileged-action approval for destructive operations.
+- [x] Add privileged-action audit contract for destructive operations.
 - [ ] Add access-review reporting.
 
 **Done evidence:** IAM design, role matrix, SSO tests, and access-review procedure.
 
 ## P2.2 Operator workspace
 
-- [ ] Build handoff queue.
-- [ ] Add tenant-safe appointment lookup.
-- [ ] Add masked conversation context.
-- [ ] Add reschedule/cancel approval actions.
-- [ ] Add conflict resolution UI/state.
+- [x] Define handoff queue and tenant-safe operator action boundary.
+- [x] Add redacted operator context and PII-minimized audit timeline.
+- [x] Add authorized reschedule/cancel/replay action contracts.
+- [ ] Build conflict resolution UI/state.
 - [ ] Add assignment and escalation workflow.
 - [ ] Add SLA timers.
-- [ ] Add audit timeline.
-- [ ] Add manual replay with confirmation and audit event.
-- [ ] Add role-based access checks to every mutation.
-- [ ] Add accessibility and keyboard/screen-reader coverage.
+- [x] Add manual replay authorization/audit contract; provider adapter remains open.
+- [x] Add role-based access checks to every operator mutation.
+- [ ] Add accessibility and keyboard/screen-reader coverage for the UI.
 
 **Done evidence:** Operator design, permission tests, accessibility audit, and support workflow.
 
 ## P2.3 Enterprise APIs and integrations
 
-- [ ] Publish versioned public API contracts.
+- [x] Publish a versioned operator API boundary at `/v1/operator/actions`.
 - [ ] Add authenticated webhooks for appointment changes.
 - [ ] Sign outbound webhooks.
-- [ ] Define webhook replay and idempotency semantics.
-- [ ] Add API rate limits.
+- [x] Define webhook replay and idempotency semantics in the durable ledger/session contracts.
+- [x] Add tenant-aware API/provider rate limits.
 - [ ] Add API key rotation and revocation.
 - [ ] Complete Google Calendar OAuth and production consent flow.
-- [ ] Add provider-specific error contracts.
+- [x] Add provider-specific error contracts for WhatsApp transport and durable ledger.
 - [ ] Select and implement the first PMS/CRM adapter only after the core contract is stable.
-- [ ] Add contract tests for every external adapter.
+- [x] Add contract tests for core external adapters.
 
 **Done evidence:** OpenAPI/event contracts, adapter test suite, and integration runbooks.
 
 ## P2.4 Compliance and governance
 
-- [ ] Complete threat model and data-flow diagram.
+- [~] Complete threat model and data-flow diagram (code boundaries and SLO/ledger runbooks updated; formal review remains open).
 - [ ] Complete privacy impact assessment.
 - [ ] Publish privacy policy and data-processing terms.
 - [ ] Maintain subprocessor inventory.
 - [ ] Define data residency requirements.
-- [ ] Define audit-log retention and export.
+- [x] Define retention, legal-hold, redaction, and bounded purge behavior.
+- [x] Define append-only operator audit export boundary.
 - [ ] Define vulnerability disclosure process.
 - [ ] Run an independent penetration test.
 - [ ] Remediate high/critical findings before GA.
@@ -388,20 +372,20 @@ Provider source of truth:
 
 ## P3.1 Capacity and cost engineering
 
-- [ ] Define traffic model per tenant and per location.
-- [ ] Define peak webhook, worker, and provider concurrency.
-- [ ] Load-test at target volume plus agreed headroom.
-- [ ] Define pool, queue, database, and provider capacity limits.
-- [ ] Add per-tenant rate limits and fairness controls.
+- [~] Define traffic model per tenant and per location (`src/enterprise/capacity.ts` contract; product targets remain open).
+- [x] Define bounded peak webhook, worker, database, and provider capacity limits.
+- [~] Load-test at target volume plus agreed headroom (deterministic smoke exists; target-volume run remains open).
+- [x] Define pool, queue, database, and provider capacity limits.
+- [x] Add per-tenant rate limits and fairness controls.
 - [ ] Track cost per appointment and per message.
 - [ ] Add budget alerts for WhatsApp, LLM, database, and observability spend.
 - [ ] Define cost allocation and chargeback/reporting requirements.
-- [ ] Optimize expensive provider calls without weakening confirmation/idempotency boundaries.
+- [~] Optimize expensive provider calls without weakening confirmation/idempotency boundaries.
 
 ## P3.2 Resilience and regional operations
 
-- [ ] Decide whether multi-region availability is required by contract.
-- [ ] Define regional failover behavior.
+- [~] Decide whether multi-region availability is required by contract.
+- [x] Define RPO/RTO validation and rebuild order in `src/enterprise/disaster_recovery.ts`.
 - [ ] Define queue/database replication strategy.
 - [ ] Add regional health checks and traffic policy.
 - [ ] Test provider behavior during regional failure.

@@ -9,10 +9,12 @@ LangGraph TypeScript state machine for the Sela reschedule agent. It maps to
 slot hold) → `confirm` (human-in-the-loop `interrupt` before the irreversible
 write) → `write` (idempotent calendar write).
 
-The app depends on `@repo/slot-engine` through `SlotServiceAdapter`. The adapter
-maps app slots and holds to the package's tenant-scoped `SlotService` and
-translates package errors at the boundary. `InMemoryCalendar` is a test helper
-only and is not the runtime default.
+The local CLI still uses `@repo/slot-engine` through `SlotServiceAdapter`.
+Database-backed runtime instead uses `PostgresCalendarWriter`: v2 holds own a
+held appointment row, tenant operation ledger, optimistic appointment version,
+and an atomic old-appointment-to-target-hold transaction. The Google Calendar
+adapter remains a provider adapter and fails closed for atomic reschedule
+because provider metadata cannot replace the local source appointment safely.
 
 The app TTL policy reads `HOLD_TTL_SECONDS`, defaults to 300 seconds, and
 clamps requests to the package maximum of 600 seconds.
@@ -87,22 +89,28 @@ secrets with
 `$env:WHATSAPP_VERIFY_TOKEN="..."` and `$env:WHATSAPP_APP_SECRET="..."` before
 running `pnpm start`.
 
-The server exposes `GET /healthz`, Meta verification on
+The server exposes `GET /healthz`, bounded Prometheus text on `GET /metrics`, Meta verification on
 `GET /webhooks/whatsapp`, and signed deliveries on `POST /webhooks/whatsapp`.
-Responses are marked `Cache-Control: no-store`; the POST body is limited to
-`MAX_WEBHOOK_BYTES` and the HTTP route has a bounded response deadline below
-the 3-second ACK SLO.
+An optional versioned operator action endpoint is available at
+`POST /v1/operator/actions` only when an OIDC verifier and operator action
+service are injected; it fails closed without them. Responses are marked
+`Cache-Control: no-store`; the POST body is limited to `MAX_WEBHOOK_BYTES` and
+the HTTP route has a bounded response deadline below the 3-second ACK SLO.
 
 ## Tenant-aware ingress and worker
 
 Apply `packages/db/migrations/0005_inbound_messages.sql`,
 `0006_reply_target.sql`, `0007_inbound_button_id.sql`,
 `0008_worker_tenant_hardening.sql`, `0009_worker_leases.sql`,
-`0010_reschedule_sessions.sql`, and `0011_tenant_scoped_dedupe.sql` after
-`0004_webhook_jobs.sql` before enabling multi-turn rescheduling and atomic
-ingress in a database-backed deployment. Migration `0011` intentionally stops
+`0010_reschedule_sessions.sql`, `0011_tenant_scoped_dedupe.sql`,
+`0012_durable_calendar_reschedule.sql`, and
+`0013_rate_limit_outbound_ledger.sql` after `0004_webhook_jobs.sql` before
+enabling multi-turn rescheduling and atomic ingress in a database-backed
+deployment. Migration `0011` intentionally stops
 if legacy `processed_messages` claims cannot be reconciled to a real tenant;
-never delete dedupe claims to force the key change.
+never delete dedupe claims to force the key change. Migration `0013` adds the
+server-only tenant rate-limit windows, PII-minimal outbound ledger, legal-hold
+controls, and append-only operator-action evidence.
 
 `DATABASE_URL` selects the Postgres composition and must use a dedicated
 server-side role with the migration-defined `service_role` grants. The pool
@@ -111,7 +119,11 @@ uses bounded statement and connection timeouts (`PG_STATEMENT_TIMEOUT_MS` and
 `WHATSAPP_RECIPIENT_ENCRYPTION_KEY_BASE64`, containing exactly 32 random bytes
 encoded as canonical base64. Keep that key stable for the lifetime of retained
 rows and load it from the deployment secret manager; never reuse the Meta access
-token as this key. `USE_IN_MEMORY=true` is an explicit local/test fallback only;
+token as this key. Database-backed mode also requires `CALENDAR_SLOTS_JSON`
+with 1–500 bounded slots. Every slot must carry `resource_id`, matching an
+existing `resources.id` for the tenant; the durable writer rejects an unbound
+slot rather than falling back to process-local state. `USE_IN_MEMORY=true` is
+an explicit local/test fallback only;
 it is mutually exclusive with `DATABASE_URL`, and without either setting startup
 fails rather than silently using process memory. `APP_MODE=server` starts the HTTP server
 and worker, while `APP_MODE=worker` starts only the worker. `SIGTERM` and
@@ -189,14 +201,16 @@ rejects state-changing drafts until a durable tenant- and hold-bound
 confirmation evidence port is available.
 
 Set `TENANT_ID` for a non-default single-tenant runtime binding. The CLI uses a
-single in-process package service for the local scaffold. The default
-composition caches one `SlotServiceAdapter` per tenant only inside that worker
-process, so a hold survives separate local jobs but is not durable across
-processes. Multi-tenant sender credentials and their tenant mappings remain a
-deployment concern: inject a registry backed by the secret manager rather than
-reusing the pilot's global adapter. Production calendar persistence/provider
-integration remains outside this cutover. Runtime slots use opaque
-staff/provider ids; `resource` retains the display label.
+single in-process package service for the local scaffold. Database-backed
+composition creates one `PostgresCalendarWriter` per tenant; its holds,
+operation keys, and source versions survive worker replacement. A reschedule is
+offered only when a trusted server workflow has attached an `appointment_id` to
+the retained inbound row. The worker never extracts that id from customer text,
+and a missing, foreign, cancelled, or non-confirmed source routes to handoff.
+Multi-tenant sender credentials remain a deployment concern: inject a registry
+backed by the secret manager rather than reusing the pilot's global adapter.
+Runtime slots use opaque `staff` provider ids, `resource` display labels, and
+the required `resource_id` database identity.
 
 The cross-tenant CLI path defaults to `CROSS_TENANT_CONSENT_GRANTED=false`
 and `CROSS_TENANT_AUTHZ_GRANTED=false`, with an empty in-memory provider. The
@@ -205,25 +219,64 @@ latter is only a local scaffold switch; it is not production authentication.
 dimensions, but no partner availability is loaded until an authenticated
 conversation authorizes it and a consented provider is wired in code.
 
-### Tests and typecheck
+### Tenant admission, delivery evidence, and enterprise boundaries
+
+Database-backed composition uses a Postgres fixed-window limiter keyed by
+`(tenant_id, scope, window_bucket)`. The webhook limiter is applied after
+channel-to-tenant resolution; the outbound limiter is applied immediately
+before provider I/O. Limits are configuration, not provider assumptions, and
+must be kept below the account's verified Meta throughput. A database limiter
+failure is fail-closed (`503`) rather than an unbounded bypass.
+
+Outbound delivery is claimed in `outbound_ledger` before the provider call.
+The ledger stores only operation identity, safe provider ids/codes, lifecycle
+timestamps, and lease state—never a recipient, message body, or access token.
+A retry replays a committed `sent` result, an expired `sending` lease becomes
+`unknown`, and an ambiguous provider timeout is never automatically resent.
+Signed Meta `statuses` callbacks are resolved to the same tenant and applied
+monotonically. Partial success across multiple drafts is safe because each
+`turn_id` has an independent ledger row.
+
+The process-local ledger/synthetic acknowledgement is available only when
+`USE_IN_MEMORY=true`; production requires a provider WAMID and a Postgres
+ledger. Operator actions are tenant-scoped, MFA-gated where destructive, and
+written to append-only `operator_action_audit`. `OidcJwtVerifier` accepts only
+RS256 tokens from an explicitly configured HTTPS issuer/JWKS endpoint.
+
+### Reliability, recovery, and smoke commands
 
 ```bash
 pnpm --filter appointment-agent typecheck
 pnpm --filter appointment-agent test
+pnpm --filter appointment-agent test:reliability
+TEST_DATABASE_URL=postgresql://... pnpm --filter appointment-agent test:postgres
+DATABASE_URL=postgresql://... pnpm --filter appointment-agent db:gate
+META_SMOKE_ENVIRONMENT=staging pnpm --filter appointment-agent smoke:meta
 ```
 
-The worker and ingress tests use injected SQL/pool doubles; no live database or
-Meta call is made by the test suite.
+`db:gate` is read-only and requires explicit TLS, backup, and restore evidence;
+it does not treat a successful migration as production approval. The Meta smoke
+defaults to a non-sending phone-number preflight. A template send additionally
+requires `META_SMOKE_ALLOW_SEND=true`, an approved template, an explicit
+recipient, and staging credentials. No automated test makes a live Meta call.
+
+Most worker and ingress tests use injected SQL/pool doubles. The durable
+calendar/ledger integration suite is enabled with `TEST_DATABASE_URL` against a
+disposable PostgreSQL database with pgvector installed; it applies every
+migration and exercises holds, reschedules, rollback, expiry, cross-tenant
+denial, concurrent moves, idempotent replay, outbound leases/statuses, and
+Postgres tenant rate counters.
 
 ### Production blockers still open
 
 This hardening pass does not make the database-backed worker pilot-ready yet. Before production enablement, the repository still needs:
 
-- durable reconciliation for ambiguous ingress/outbound commits;
-- a durable tenant-scoped calendar writer (the current default is local scaffold);
-- an atomic reschedule contract that replaces the existing appointment; the current flow confirms a selected hold but has no old appointment target;
-- a secret-backed production `OutboundSenderRegistry` with per-tenant Meta credentials, rotation, and a durable outbound idempotency/status ledger;
-- live Postgres/Supabase RLS, role, and TLS verification.
+- trusted upstream workflow that attaches the existing appointment id; the database contract is fail-closed but the product source-of-truth decision remains open;
+- passing production-like `TEST_DATABASE_URL` migration/calendar/ledger integration, plus the external `db:gate` evidence for RLS, roles, TLS, backup, and restore;
+- reconciliation between the Postgres source of truth and Google Calendar, including provider success-after-timeout behavior;
+- a secret-backed production `OutboundSenderRegistry` with per-tenant Meta credentials, rotation, and an operator-approved path for resolving `unknown` ledger rows;
+- approved live Meta staging credentials/template, signed inbound/button/status smoke evidence, and delivery callback verification;
+- enterprise OIDC/SAML rollout, MFA policy, operator workspace UI, penetration-test evidence, data-residency approval, and DR exercise sign-off.
 
 Meta transport and customer-service-window behavior follow the official
 Cloud API documentation: https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/send-messages

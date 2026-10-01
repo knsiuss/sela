@@ -38,6 +38,58 @@ P0.6 evidence: per-tenant Meta credentials resolve at runtime through the secret
 2. Rotate the Meta credential in the secret provider (pilot: the env-backed `EnvSecretManager` port adapter, so update the environment/secret store and restart/redeploy), then confirm a canary send for the tenant and an unmapped-tenant fail-closed check. Roll back by re-revoking; rotation applies to new sends without a restart once the managed provider replaces the env adapter.
 3. Rotate a recipient key by adding the new key id to `WHATSAPP_RECIPIENT_ENCRYPTION_KEYS_JSON` with the old id retained (overlap ≤8 keys), switching `active_key_id`, and verifying old rows still open. Remove the old id only after retention expiry. Approval: security owner + on-call sign-off; record key ids (never values), timestamps, and the rotation drill result here.
 
+## RB-07 Durable calendar/reschedule recovery (owner: backend)
+
+1. Stop HTTP/worker writers and preserve the pre-change database backup. Do not delete `processed_messages`, `appointment_holds`, `calendar_operations`, appointments, or audit rows.
+2. Apply migrations through `0012_durable_calendar_reschedule.sql`; stop if the migration reports a legacy tenant/resource mismatch. Reconcile ownership from an approved source, then rerun.
+3. Verify every configured `CALENDAR_SLOTS_JSON` entry has a `resource_id` owned by the same tenant. Start one canary worker and run a disposable-tenant hold, duplicate retry, reschedule, and duplicate-confirmation smoke test.
+4. For an uncertain reschedule result, look up `(tenant_id, operation_key)` in `calendar_operations`. If present, return the committed result; if absent, inspect the source appointment version and hold before any replay. Never guess or edit a result row.
+5. For an expired/conflicting hold, keep the source appointment unchanged, release the hold idempotently, and re-offer. Route stale version, missing, cancelled, or cross-tenant state to operator handoff.
+6. Roll back application traffic first. Leave additive migration objects in place unless a reviewed down migration proves no live writer depends on them; restore from backup if tenant ownership or key state cannot be reconciled.
+
+## RB-08 Tenant rate limit and outbound ledger (owner: backend/SRE)
+
+1. Check `GET /metrics` for `webhook_rate_limited_total`, `outbound_provider_sends_total{result="unknown"}`, and `outbound_provider_sends_total{result="failed"}`. Do not raise the limit during an incident without confirming the tenant's Meta throughput tier.
+2. For an exhausted tenant, verify the fixed-window row in `tenant_rate_limits` and the caller's `Retry-After` response. Correct the tenant's queue/backlog or provider error first; never delete counters to reset a limit.
+3. For an `unknown` outbound row, stop automatic replay. Query `outbound_ledger` by `(tenant_id, provider, operation_key)`, reconcile the provider WAMID/status callback, and require an MFA-authenticated operator action before any manual replay.
+4. For a partial multi-draft job, confirm that sent rows are replayed and only the unsent row is retried. Never reconstruct a recipient from a queue payload.
+
+## RB-09 Database production gate (owner: backend/SRE)
+
+1. Take and independently verify a backup. Record `DATABASE_BACKUP_VERIFIED_AT`, `DATABASE_BACKUP_REFERENCE`, `DATABASE_RESTORE_TESTED_AT`, and `DATABASE_RESTORE_REFERENCE` from the restore system, not from application memory.
+2. Run `pnpm --filter appointment-agent db:gate` with `DATABASE_URL` and `DATABASE_GATE_REQUIRE_TLS=true`. The command must report schema, RLS, role isolation, timeout, TLS, backup, and restore checks as passed.
+3. Stop the deployment on any failure. Do not use `--skip` or edit `pg_class`/`information_schema` to make the gate pass. Preserve the report and the database backup with the release evidence.
+4. Re-run the calendar and ledger integration suite against the same migration image. Roll back application traffic before any migration rollback; leave additive tables in place when safe.
+
+## RB-10 Meta staging smoke (owner: integrations/on-call)
+
+1. Confirm `META_SMOKE_ENVIRONMENT=staging`, an approved non-promotional template, a test recipient, and a dedicated staging phone number. Never use a production customer list.
+2. Run `pnpm --filter appointment-agent smoke:meta` for the non-sending phone-number preflight. Record only provider request id/WAMID, safe status codes, and timestamps.
+3. Run the signed webhook fixture and verify inbound text, button, duplicate, handoff, outbound reply, and delivery-status callbacks. Confirm the raw recipient is absent from logs, ledger rows, and metrics.
+4. A template send requires `META_SMOKE_ALLOW_SEND=true`; without it the command exits blocked. For rate-limit or revoked-token tests, use a dedicated test tenant and preserve the safe error code.
+5. If the provider returns `130429` or a timeout, stop the send loop, inspect tenant fairness and the account throughput tier, and reconcile any `unknown` ledger rows before resuming.
+
+## RB-11 Reliability and chaos exercise (owner: SRE)
+
+1. Before the exercise, export the SLO snapshot, queue age, database pool utilization, provider error rate, and ledger `unknown` count. Use synthetic WAMIDs and synthetic tenants only.
+2. Run `pnpm --filter appointment-agent test:reliability` and the PostgreSQL calendar/ledger integration suite. Inject one database latency, one pool-exhaustion, one provider-timeout, and one worker-abort scenario at a time.
+3. Stop the exercise if ACK latency exceeds 3 seconds, oldest job age exceeds 60 seconds, a duplicate calendar mutation appears, or an `unknown` row is resent without operator approval.
+4. Record the failure matrix, elapsed recovery time, alert delivery, and remediation owner. Do not call the exercise complete without the production-like database and Meta evidence.
+
+## RB-12 Enterprise access and operator actions (owner: security/operations)
+
+1. Verify the OIDC issuer, audience, HTTPS JWKS endpoint, RS256 algorithm, `sid`, expiry, and MFA `amr` claims before enabling `/v1/operator/actions`.
+2. Test owner/admin/operator/support/analyst/developer matrix and cross-tenant denial. A bearer token without a verified tenant membership is rejected before any action.
+3. Require MFA and an append-only `operator_action_audit` row for replay, cancellation, or tenant-management actions. Never persist the free-form reason or access token.
+4. Revoke the session and rotate provider credentials immediately if an operator token or JWKS response is suspected compromised. Preserve audit evidence and follow RB-06.
+
+## RB-13 Disaster recovery (owner: infrastructure/SRE)
+
+1. Validate approved RPO/RTO, backup reference, restore-test timestamp, and data-residency region. A missing value is a release blocker.
+2. Rebuild in the order returned by `recovery_rebuild_order()`: database/migrations, provider credentials, HTTP health, worker, ledger reconciliation, then traffic.
+3. After restore, verify tenant/resource ownership, calendar operation replay, outbound `unknown` rows, RLS/role checks, and SLOs before reopening traffic.
+4. Record actual RPO/RTO and every manual decision. A code contract without a restore exercise is not DR evidence.
+
 ## RB-14 Incident severity, communications, and postmortem (owner: SRE)
 
 P1.4 evidence: severity levels, communications roles, postmortem template, and the first on-call handoff exercise record live here; no separate incident doc is authoritative.
