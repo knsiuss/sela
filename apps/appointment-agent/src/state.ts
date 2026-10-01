@@ -9,6 +9,8 @@ export interface TimeSlot {
   end_iso: string;
   staff?: string;
   resource?: string;
+  /** Stable database resource id used by the durable writer. */
+  resource_id?: string;
 }
 
 export interface SlotHold {

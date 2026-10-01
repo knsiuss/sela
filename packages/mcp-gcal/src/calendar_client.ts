@@ -135,7 +135,7 @@ export class GoogleCalendarClient {
       body: JSON.stringify(input.event),
     });
     if (!is_record(response)) {
-      throw new GoogleCalendarError("invalid_response", operation, "Google event response was invalid");
+      throw new GoogleCalendarError("invalid_response", operation, "format was invalid");
     }
     return response as GoogleCalendarEvent;
   }

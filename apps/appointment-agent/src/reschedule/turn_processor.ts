@@ -2,12 +2,18 @@
 
 import { createHash } from "node:crypto";
 import { detect_handoff_reason } from "../handoff.js";
-import { create_initial_appointment_state } from "../state.js";
+import { create_initial_appointment_state, type Intent } from "../state.js";
 import {
+  AppointmentNotFoundError,
+  AppointmentNotReschedulableError,
+  AppointmentVersionConflictError,
+  CalendarOperationConflictError,
   HoldExpiredError,
   SlotUnavailableError,
+  type CalendarAppointment,
   type CalendarPort,
 } from "../tools/calendar.js";
+import type { AppointmentRepository } from "../appointments/appointment_repository.js";
 import { HOLD_TTL_SECONDS } from "../tools/hold_ttl.js";
 import type { GraphRunner, OutboundDraft, TurnProcessorInput } from "../worker/process_job.js";
 import { parse_reschedule_button_action, type RescheduleButtonAction } from "./button_actions.js";
@@ -17,6 +23,7 @@ import {
   type RescheduleSessionState,
 } from "./session_model.js";
 import type { RescheduleSessionScope, RescheduleSessionStore } from "./session_store.js";
+import type { RescheduleAudit, RescheduleRejectionReason } from "./audit.js";
 import { build_reschedule_turn_draft } from "./turn_drafts.js";
 
 /** Session retention aligned with the customer service conversation window. */
@@ -34,9 +41,16 @@ export class RescheduleTurnConflictError extends Error {
   }
 }
 
+interface SourceAppointmentResolution {
+  appointment: CalendarAppointment | null;
+  rejection_reason?: RescheduleRejectionReason;
+}
+
 /** Dependencies for one tenant-scoped default turn processor. */
 export interface RescheduleTurnProcessorOptions {
   session_store: RescheduleSessionStore;
+  appointment_repository: AppointmentRepository;
+  reschedule_audit: RescheduleAudit;
   calendar: CalendarPort;
   graph_runner: GraphRunner;
   clock?: () => Date;
@@ -52,6 +66,8 @@ export interface RescheduleTurnProcessorOptions {
  */
 export class RescheduleTurnProcessor {
   private readonly session_store: RescheduleSessionStore;
+  private readonly appointment_repository: AppointmentRepository;
+  private readonly reschedule_audit: RescheduleAudit;
   private readonly calendar: CalendarPort;
   private readonly graph_runner: GraphRunner;
   private readonly clock: () => Date;
@@ -59,6 +75,8 @@ export class RescheduleTurnProcessor {
   /** Create the default processor with explicit state and calendar boundaries. */
   constructor(options: RescheduleTurnProcessorOptions) {
     this.session_store = options.session_store;
+    this.appointment_repository = options.appointment_repository;
+    this.reschedule_audit = options.reschedule_audit;
     this.calendar = options.calendar;
     this.graph_runner = options.graph_runner;
     this.clock = options.clock ?? (() => new Date());
@@ -105,7 +123,18 @@ export class RescheduleTurnProcessor {
     if (session?.phase === "confirmed" && state.intent === "cancel") {
       return this.enter_handoff(input, scope, session);
     }
-    if (is_offer_result(state)) return this.persist_offer(input, scope, session, state.candidate_slots);
+    if (is_offer_result(state)) {
+      const resolution = await this.resolve_source_appointment(input, session, state.intent);
+      if (state.intent === "reschedule" && resolution.appointment === null) {
+        await this.audit_rejection(input, session, resolution.rejection_reason);
+        return this.enter_handoff(input, scope, session);
+      }
+      if (state.intent === "book" && session?.appointment_id !== null && session?.appointment_id !== undefined) {
+        await this.audit_rejection(input, session, "intent_context_mismatch");
+        return this.enter_handoff(input, scope, session);
+      }
+      return this.persist_offer(input, scope, session, state.candidate_slots, resolution.appointment);
+    }
     return build_reschedule_turn_draft({ kind: "graph", state }, input.reply_target);
   }
 
@@ -114,12 +143,15 @@ export class RescheduleTurnProcessor {
     scope: RescheduleSessionScope,
     session: RescheduleSession | null,
     candidate_slots: RescheduleSessionState["candidate_slots"],
+    appointment: CalendarAppointment | null,
   ): Promise<OutboundDraft> {
     const ordered_slots = [...candidate_slots]
       .sort((left, right) => left.start_iso.localeCompare(right.start_iso) || left.id.localeCompare(right.id))
       .slice(0, 2);
     const state: RescheduleSessionState = {
       phase: "offered",
+      appointment_id: appointment?.appointment_id ?? null,
+      source_appointment_version: appointment?.version ?? null,
       candidate_slots: ordered_slots,
       chosen_slot_id: null,
       hold_id: null,
@@ -130,6 +162,48 @@ export class RescheduleTurnProcessor {
     };
     const saved = await this.commit(scope, state, session?.version ?? null);
     return build_reschedule_turn_draft({ kind: "offer", session: saved }, input.reply_target);
+  }
+
+  private async resolve_source_appointment(
+    input: TurnProcessorInput,
+    session: RescheduleSession | null,
+    intent: Intent,
+  ): Promise<SourceAppointmentResolution> {
+    if (intent !== "reschedule") return { appointment: null };
+    const trusted_id = input.message.appointment_id;
+    const session_id = session?.appointment_id ?? null;
+    if (session_id !== null && trusted_id !== undefined && session_id !== trusted_id) {
+      return { appointment: null, rejection_reason: "appointment_context_changed" };
+    }
+    const appointment_id = session_id ?? trusted_id;
+    if (appointment_id === undefined) {
+      return { appointment: null, rejection_reason: "appointment_context_missing" };
+    }
+    const appointment = await this.appointment_repository.get({
+      tenant_id: input.tenant_id,
+      appointment_id,
+    });
+    if (appointment === null || appointment.tenant_id !== input.tenant_id) {
+      return { appointment: null, rejection_reason: "appointment_not_found_or_wrong_tenant" };
+    }
+    if (appointment.status !== "confirmed") {
+      return { appointment: null, rejection_reason: "appointment_not_reschedulable" };
+    }
+    return { appointment };
+  }
+
+  private async audit_rejection(
+    input: TurnProcessorInput,
+    session: RescheduleSession | null,
+    reason: RescheduleRejectionReason = "appointment_context_missing",
+  ): Promise<void> {
+    const appointment_id = session?.appointment_id ?? input.message.appointment_id;
+    await this.reschedule_audit.record_rejection({
+      tenant_id: input.tenant_id,
+      conversation_id: input.conversation_id,
+      ...(appointment_id === undefined ? {} : { appointment_id }),
+      reason,
+    });
   }
 
   private async handle_button(
@@ -209,19 +283,43 @@ export class RescheduleTurnProcessor {
     scope: RescheduleSessionScope,
     session: RescheduleSession,
   ): Promise<OutboundDraft> {
-    if (session.hold_id === null) throw new RescheduleTurnConflictError();
+    if (session.hold_id === null || session.chosen_slot_id === null) {
+      throw new RescheduleTurnConflictError();
+    }
     try {
-      await this.calendar.confirm_hold(
-        session.hold_id,
-        operation_key("confirm", scope, session.offer_generation, session.hold_id),
-      );
-    } catch (error) {
-      if (error instanceof HoldExpiredError) {
-        return this.reoffer(input, scope, session);
+      if (session.appointment_id !== null && session.source_appointment_version !== null) {
+        await this.calendar.reschedule_appointment({
+          tenant_id: input.tenant_id,
+          appointment_id: session.appointment_id,
+          expected_version: session.source_appointment_version,
+          hold_id: session.hold_id,
+          target_slot_id: session.chosen_slot_id,
+          idempotency_key: operation_key(
+            "reschedule",
+            scope,
+            session.offer_generation,
+            `${session.appointment_id}:${session.hold_id}`,
+          ),
+        });
+      } else {
+        await this.calendar.confirm_hold(
+          session.hold_id,
+          operation_key("confirm", scope, session.offer_generation, session.hold_id),
+        );
       }
-      if (error instanceof SlotUnavailableError) {
+    } catch (error) {
+      if (error instanceof HoldExpiredError || error instanceof SlotUnavailableError) {
         await this.calendar.release_hold(session.hold_id);
         return this.reoffer(input, scope, session);
+      }
+      if (
+        error instanceof AppointmentNotFoundError
+        || error instanceof AppointmentVersionConflictError
+        || error instanceof AppointmentNotReschedulableError
+        || error instanceof CalendarOperationConflictError
+      ) {
+        await this.calendar.release_hold(session.hold_id);
+        return this.enter_handoff(input, scope, session);
       }
       throw error;
     }
@@ -328,6 +426,8 @@ export class RescheduleTurnProcessor {
     }
     const state: RescheduleSessionState = {
       phase: "handoff",
+      appointment_id: session?.appointment_id ?? null,
+      source_appointment_version: session?.source_appointment_version ?? null,
       candidate_slots: session?.candidate_slots ?? [],
       chosen_slot_id: null,
       hold_id: null,
@@ -365,6 +465,8 @@ function session_scope(input: TurnProcessorInput): RescheduleSessionScope {
 function to_state(session: RescheduleSession): RescheduleSessionState {
   return {
     phase: session.phase,
+    appointment_id: session.appointment_id,
+    source_appointment_version: session.source_appointment_version,
     candidate_slots: session.candidate_slots.map((slot) => ({ ...slot })),
     chosen_slot_id: session.chosen_slot_id,
     hold_id: session.hold_id,
@@ -408,7 +510,7 @@ function next_generation(current: number | undefined): number {
 }
 
 function operation_key(
-  operation: "hold" | "confirm",
+  operation: "hold" | "confirm" | "reschedule",
   scope: RescheduleSessionScope,
   generation: number,
   resource_id: string,

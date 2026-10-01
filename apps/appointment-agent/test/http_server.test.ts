@@ -5,7 +5,9 @@ import { describe, expect, it } from "vitest";
 import { InMemoryMessageDedupe } from "../src/ingress/dedupe.js";
 import { InMemoryInboundMessageStore } from "../src/ingress/inbound_store.js";
 import { InMemoryTenantResolver } from "../src/ingress/tenant_resolver.js";
+import { InMemoryTenantRateLimiter } from "../src/rate_limit/tenant_rate_limiter.js";
 import { AesGcmRecipientCipher } from "../src/security/recipient_cipher.js";
+import { MetricsRegistry } from "../src/observability/metrics.js";
 import {
   create_http_server,
   load_server_config,
@@ -238,6 +240,35 @@ describe("http webhook server", () => {
     });
   });
 
+  it("returns a bounded 429 with Retry-After when the tenant limit is exhausted", async () => {
+    const queue = new InMemoryWebhookQueue();
+    const rate_limiter = new InMemoryTenantRateLimiter(() => 1_000);
+    const first_body = VALID_BODY.replace("wamid.http-test", "wamid.rate-one");
+    const second_body = VALID_BODY.replace("wamid.http-test", "wamid.rate-two");
+    await with_server({
+      ...dependencies(),
+      job_queue: queue,
+      rate_limiter,
+      inbound_rate_limit: 1,
+      inbound_rate_window_seconds: 60,
+    }, async (base_url) => {
+      const first = await make_request(base_url, "/webhooks/whatsapp", {
+        method: "POST",
+        headers: { "x-hub-signature-256": signature_for(first_body) },
+        body: first_body,
+      });
+      expect(first.status).toBe(200);
+      const second = await make_request(base_url, "/webhooks/whatsapp", {
+        method: "POST",
+        headers: { "x-hub-signature-256": signature_for(second_body) },
+        body: second_body,
+      });
+      expect(second.status).toBe(429);
+      expect(second.headers["retry-after"]).toBeDefined();
+      expect(queue.pending_jobs()).toHaveLength(1);
+    });
+  });
+
   it("exposes health and completes a signed request within the ACK budget", async () => {
     await with_server(dependencies(), async (base_url) => {
       const health = await make_request(base_url, "/healthz");
@@ -256,8 +287,7 @@ describe("http webhook server", () => {
     });
   });
 
-  it("propagates W3C trace context without touching message content", async () => {
-    await with_server(dependencies(), async (base_url) => {
+  it("propagates W3C trace context without touching message content", async () => {    await with_server(dependencies(), async (base_url) => {
       const incoming = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
       const continued = await make_request(base_url, "/healthz", { headers: { traceparent: incoming } });
       expect(continued.status).toBe(200);
@@ -268,5 +298,22 @@ describe("http webhook server", () => {
       const fresh = await make_request(base_url, "/healthz");
       expect(String(fresh.headers["traceparent"])).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
     });
+  });
+
+  it("scrapes runtime gauges on the metrics endpoint", async () => {
+    const metrics = new MetricsRegistry();
+    await with_server(
+      {
+        ...dependencies(),
+        metrics,
+        gauge_providers: { queue_depth: () => 4, outbound_ledger_unknown: () => 1 },
+      },
+      async (base_url) => {
+        const response = await make_request(base_url, "/metrics");
+        expect(response.status).toBe(200);
+        expect(response.body).toContain("worker_queue_depth_gauge 4");
+        expect(response.body).toContain("outbound_ledger_unknown_gauge 1");
+      },
+    );
   });
 });

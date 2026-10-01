@@ -41,6 +41,17 @@ describe("WhatsAppSenderAdapter", () => {
     expect(transport.messages()[0]).toMatchObject({ type: "text", text: { body: "Choose a time" } });
   });
 
+  it("does not forward a caller key when trusted inbound identity is present", async () => {
+    const transport = new InMemoryTransport();
+    const adapter = new WhatsAppSenderAdapter(new WhatsAppSender(transport));
+
+    await adapter.send({ ...DRAFT, idempotency_key: "caller-controlled-key", buttons: undefined });
+
+    const submitted = transport.messages()[0];
+    expect(submitted?.idempotency_key).toMatch(/^wa:/u);
+    expect(submitted?.idempotency_key).not.toBe("caller-controlled-key");
+  });
+
   it("propagates a provider failure as a retryable sender error", async () => {
     const sender = new WhatsAppSender({
       send: async () => ({ wamid: "wamid.failed", status: "failed" as const }),

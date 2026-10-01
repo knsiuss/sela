@@ -10,6 +10,8 @@ export const MAX_RESCHEDULE_SESSION_COUNTER = 2_147_483_647;
 export const MAX_RESCHEDULE_SESSION_SLOTS = 3;
 
 const bounded_id_schema = z.string().trim().min(1).max(256);
+const resource_id_schema = z.string().regex(/^[1-9]\d{0,18}$/);
+const appointment_id_schema = z.string().uuid();
 const conversation_id_schema = z.string().trim().min(1).max(128);
 const wamid_schema = z.string().trim().min(1).max(128);
 const timestamp_schema = z
@@ -24,6 +26,7 @@ const slot_schema = z.object({
   end_iso: timestamp_schema,
   staff: z.string().trim().min(1).max(128).optional(),
   resource: z.string().trim().min(1).max(128).optional(),
+  resource_id: resource_id_schema.optional(),
 }).strict().refine((slot) => Date.parse(slot.end_iso) > Date.parse(slot.start_iso), {
   message: "slot end must follow start",
   path: ["end_iso"],
@@ -42,6 +45,8 @@ export type RescheduleSessionPhase = z.infer<typeof reschedule_session_phase_sch
 
 const state_structure_schema = z.object({
   phase: reschedule_session_phase_schema,
+  appointment_id: appointment_id_schema.nullable(),
+  source_appointment_version: counter_schema.nullable(),
   candidate_slots: z.array(slot_schema).max(MAX_RESCHEDULE_SESSION_SLOTS),
   chosen_slot_id: bounded_id_schema.nullable(),
   hold_id: bounded_id_schema.nullable(),
@@ -100,6 +105,9 @@ export function parse_reschedule_session(value: unknown): RescheduleSession {
 }
 
 function assert_phase_invariants(session: RescheduleSessionState): void {
+  if ((session.appointment_id === null) !== (session.source_appointment_version === null)) {
+    throw new RescheduleSessionValidationError();
+  }
   if (session.phase === "offered" && has_selection_or_hold(session)) {
     throw new RescheduleSessionValidationError();
   }

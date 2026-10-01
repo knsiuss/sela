@@ -1,4 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
+import { extract_outbound_statuses, type ParsedOutboundStatus } from "./outbound/status_events.js";
+import type { OutboundLedgerStore } from "./outbound/outbound_ledger.js";
+import type { MetricsSink } from "./observability/metrics.js";
+import {
+  consume_or_throw,
+  RateLimitExceededError,
+  type TenantRateLimiter,
+} from "./rate_limit/tenant_rate_limiter.js";
 import { is_valid_signature, verify_challenge, type VerifyQuery } from "./ingress/verify.js";
 import type { MessageDedupeStore } from "./ingress/dedupe.js";
 import type { TenantResolver } from "./ingress/tenant_resolver.js";
@@ -74,6 +82,15 @@ export interface InboundRequestOptions {
   recipient_cipher?: RecipientCipher;
   /** Atomically claims, retains, and enqueues Postgres-backed messages. */
   atomic_ingress?: AtomicIngressStore;
+  /** Tenant-scoped admission control applied after channel resolution. */
+  rate_limiter?: TenantRateLimiter;
+  /** Webhook limit applied to each resolved inbound/status event. */
+  inbound_rate_limit?: number;
+  inbound_rate_window_seconds?: number;
+  /** Durable status writer; production composition must provide it for status callbacks. */
+  outbound_ledger?: OutboundLedgerStore;
+  /** Optional metrics sink; labels are bounded operational dimensions only. */
+  metrics?: MetricsSink;
   /** Cancels an in-flight atomic database transaction at the HTTP deadline. */
   signal?: AbortSignal;
   /** Overrides the default retention used when creating a record. */
@@ -87,6 +104,10 @@ export interface InboundHandleResult {
   duplicate_count: number;
   enqueued_count: number;
   unresolved_count: number;
+  status_count: number;
+  status_updated_count: number;
+  status_duplicate_count: number;
+  status_ignored_count: number;
 }
 
 /** In-memory queue for tests and local dev. */
@@ -325,13 +346,23 @@ export async function handle_inbound_request(
   }
   const request_id = generate_request_id();
   const received_at_iso = new Date().toISOString();
-  const messages = extract_raw_message_nodes(parse_payload(raw_body));
+  const payload = parse_payload(raw_body);
+  const messages = extract_raw_message_nodes(payload);
+  let statuses: ParsedOutboundStatus[];
+  try {
+    statuses = extract_outbound_statuses(payload);
+  } catch {
+    throw new InvalidWebhookPayloadError("malformed-status-node");
+  }
   const recipient_cipher = options.inbound_store === undefined
     ? options.recipient_cipher
     : require_recipient_cipher(options.recipient_cipher);
   let duplicate_count = 0;
   let enqueued_count = 0;
   let unresolved_count = 0;
+  let status_updated_count = 0;
+  let status_duplicate_count = 0;
+  let status_ignored_count = 0;
 
   for (const { message, channel_account_id } of messages) {
     const tenant_id = await resolve_tenant(options.tenant_resolver, channel_account_id, options.signal);
@@ -341,6 +372,7 @@ export async function handle_inbound_request(
     }
 
     const resolved_tenant_id = tenant_id;
+    await enforce_rate_limit(options, resolved_tenant_id);
     const conversation_id = derive_conversation_id(message.sender_phone_e164);
     const atomic_ingress = options.atomic_ingress;
     if (atomic_ingress !== undefined) {
@@ -416,13 +448,63 @@ export async function handle_inbound_request(
     enqueued_count += 1;
     log_audit_event({ request_id, conversation_id, event: "webhook_enqueued", wamid: message.wamid });
   }
+  if (statuses.length > 0 && options.outbound_ledger === undefined) {
+    throw new WebhookQueueError(new Error("outbound-status-ledger-unavailable"));
+  }
+  for (const status of statuses) {
+    const tenant_id = await resolve_tenant(options.tenant_resolver, status.channel_account_id, options.signal);
+    if (tenant_id === null || tenant_id === undefined) {
+      unresolved_count += 1;
+      continue;
+    }
+    await enforce_rate_limit(options, tenant_id);
+    try {
+      const result = await options.outbound_ledger!.record_status(tenant_id, status.event);
+      if (result === "updated") {
+        status_updated_count += 1;
+        options.metrics?.increment("outbound_status_events_total", { result: "updated" });
+      } else if (result === "duplicate") {
+        status_duplicate_count += 1;
+        options.metrics?.increment("outbound_status_events_total", { result: "duplicate" });
+      } else {
+        status_ignored_count += 1;
+        options.metrics?.increment("outbound_status_events_total", { result: "ignored" });
+      }
+    } catch (error) {
+      throw new WebhookQueueError(error);
+    }
+  }
   return {
     request_id,
     received_count: messages.length,
     duplicate_count,
     enqueued_count,
     unresolved_count,
+    status_count: statuses.length,
+    status_updated_count,
+    status_duplicate_count,
+    status_ignored_count,
   };
+}
+
+async function enforce_rate_limit(options: InboundRequestOptions, tenant_id: string): Promise<void> {
+  if (options.rate_limiter === undefined) return;
+  try {
+    await consume_or_throw(options.rate_limiter, {
+      tenant_id,
+      scope: "webhook",
+      limit: options.inbound_rate_limit ?? 120,
+      window_seconds: options.inbound_rate_window_seconds ?? 60,
+    });
+    options.metrics?.increment("webhook_rate_limited_total", { result: "allowed" });
+  } catch (error) {
+    if (error instanceof RateLimitExceededError) {
+      options.metrics?.increment("webhook_rate_limited_total", { result: "denied" });
+      throw error;
+    }
+    options.metrics?.increment("webhook_rate_limited_total", { result: "unavailable" });
+    throw new WebhookQueueError(error);
+  }
 }
 
 function require_recipient_cipher(cipher: RecipientCipher | undefined): RecipientCipher {

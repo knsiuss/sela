@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AppointmentStateType, TimeSlot } from "../../src/state.js";
 import {
+  AppointmentVersionConflictError,
   HoldExpiredError,
   SlotUnavailableError,
   type CalendarPort,
 } from "../../src/tools/calendar.js";
 import { InMemoryRescheduleSessionStore } from "../../src/reschedule/session_store.js";
+import { InMemoryAppointmentRepository } from "../../src/appointments/appointment_repository.js";
+import { InMemoryRescheduleAudit } from "../../src/reschedule/audit.js";
 import { RescheduleTurnProcessor } from "../../src/reschedule/turn_processor.js";
 import type {
   GraphRunner,
@@ -13,6 +16,7 @@ import type {
 } from "../../src/worker/process_job.js";
 
 const PHONE = "+15551234567";
+const APPOINTMENT_ID = "00000000-0000-4000-8000-000000000042";
 const NOW_ISO = "2026-09-24T08:00:00.000Z";
 const HOLD_EXPIRES_ISO = "2026-09-24T08:05:00.000Z";
 const SLOTS: TimeSlot[] = [
@@ -26,11 +30,34 @@ function make_calendar() {
     expires_at_iso: HOLD_EXPIRES_ISO,
   }));
   const confirm_hold = vi.fn(async () => undefined);
+  const reschedule_appointment = vi.fn(async (command) => ({
+    appointment_id: command.appointment_id,
+    previous_version: command.expected_version,
+    version: command.expected_version + 1,
+    hold_id: command.hold_id,
+    target_slot_id: command.target_slot_id,
+    status: "confirmed" as const,
+  }));
   const release_hold = vi.fn(async () => undefined);
   const cancel_booking = vi.fn(async () => undefined);
   const list_slots = vi.fn(async () => SLOTS);
-  const calendar: CalendarPort = { list_slots, hold_slot, confirm_hold, release_hold, cancel_booking };
-  return { calendar, hold_slot, confirm_hold, release_hold, cancel_booking, list_slots };
+  const calendar: CalendarPort = {
+    list_slots,
+    hold_slot,
+    confirm_hold,
+    reschedule_appointment,
+    release_hold,
+    cancel_booking,
+  };
+  return {
+    calendar,
+    hold_slot,
+    confirm_hold,
+    reschedule_appointment,
+    release_hold,
+    cancel_booking,
+    list_slots,
+  };
 }
 
 function offered_state(state: AppointmentStateType): AppointmentStateType {
@@ -46,16 +73,30 @@ function offered_state(state: AppointmentStateType): AppointmentStateType {
 function make_harness() {
   let now_ms = Date.parse(NOW_ISO);
   const session_store = new InMemoryRescheduleSessionStore({ clock: () => new Date(now_ms) });
+  const appointment_repository = new InMemoryAppointmentRepository([{
+    appointment_id: APPOINTMENT_ID,
+    tenant_id: "42",
+    version: 1,
+    status: "confirmed",
+    resource_id: "7",
+    starts_at_iso: "2026-09-30T08:00:00.000Z",
+    ends_at_iso: "2026-09-30T08:30:00.000Z",
+  }]);
+  const reschedule_audit = new InMemoryRescheduleAudit();
   const calendar = make_calendar();
   const graph_runner: GraphRunner = { invoke: vi.fn(async (state) => offered_state(state)) };
   const create_processor = () => new RescheduleTurnProcessor({
     session_store,
+    appointment_repository,
+    reschedule_audit,
     calendar: calendar.calendar,
     graph_runner,
     clock: () => new Date(now_ms),
   });
   return {
     session_store,
+    appointment_repository,
+    reschedule_audit,
     ...calendar,
     graph_runner,
     create_processor,
@@ -77,6 +118,7 @@ function turn(overrides: Partial<TurnProcessorInput> = {}): TurnProcessorInput {
       sender_ref: "opaque-sender-reference",
       text_body: "I would like to reschedule",
       message_kind: "text",
+      appointment_id: APPOINTMENT_ID,
       sent_at_iso: NOW_ISO,
     },
     ...overrides,
@@ -100,6 +142,7 @@ function button_turn(input: {
       text_body: input.text_body ?? "Quick reply",
       message_kind: "button_reply",
       button_id: input.button_id,
+      appointment_id: APPOINTMENT_ID,
       sent_at_iso: NOW_ISO,
     },
   });
@@ -130,9 +173,82 @@ describe("reschedule turn processor", () => {
     expect(harness.cancel_booking).not.toHaveBeenCalled();
     expect(harness.graph_runner.invoke).toHaveBeenCalledTimes(1);
     const session = await harness.session_store.load({ tenant_id: "42", conversation_id: "conversation-1" });
-    expect(session).toMatchObject({ phase: "offered", offer_generation: 1, last_wamid: "wamid-1" });
+    expect(session).toMatchObject({
+      phase: "offered",
+      appointment_id: APPOINTMENT_ID,
+      source_appointment_version: 1,
+      offer_generation: 1,
+      last_wamid: "wamid-1",
+    });
     expect(JSON.stringify(session)).not.toContain("I would like to reschedule");
     expect(JSON.stringify(session)).not.toContain(PHONE);
+  });
+
+  it("fails to an operator handoff when no trusted appointment context exists", async () => {
+    const harness = make_harness();
+    const [draft] = await harness.create_processor().process(turn({
+      wamid: "wamid-without-appointment",
+      message: {
+        wamid: "wamid-without-appointment",
+        sender_ref: "opaque-sender-reference",
+        text_body: "I would like to reschedule",
+        message_kind: "text",
+        sent_at_iso: NOW_ISO,
+      },
+    }));
+
+    expect(draft?.text).toContain("team");
+    expect(harness.hold_slot).not.toHaveBeenCalled();
+    expect(harness.reschedule_appointment).not.toHaveBeenCalled();
+    expect(harness.reschedule_audit.rejections).toEqual([{
+      tenant_id: "42",
+      conversation_id: "conversation-1",
+      reason: "appointment_context_missing",
+    }]);
+    expect(await harness.session_store.load({ tenant_id: "42", conversation_id: "conversation-1" }))
+      .toMatchObject({ phase: "handoff", appointment_id: null });
+  });
+
+  it("audits a cancelled source before routing to handoff", async () => {
+    const harness = make_harness();
+    harness.appointment_repository.put({
+      appointment_id: APPOINTMENT_ID,
+      tenant_id: "42",
+      version: 4,
+      status: "cancelled",
+      resource_id: "7",
+      starts_at_iso: "2026-09-30T08:00:00.000Z",
+      ends_at_iso: "2026-09-30T08:30:00.000Z",
+    });
+
+    const [draft] = await harness.create_processor().process(turn({ wamid: "wamid-cancelled-source" }));
+
+    expect(draft?.text).toContain("team");
+    expect(harness.reschedule_audit.rejections).toEqual([{
+      tenant_id: "42",
+      conversation_id: "conversation-1",
+      appointment_id: APPOINTMENT_ID,
+      reason: "appointment_not_reschedulable",
+    }]);
+    expect(harness.hold_slot).not.toHaveBeenCalled();
+  });
+
+  it("routes an optimistic source-version conflict to handoff after releasing the target", async () => {
+    const harness = make_harness();
+    await offer(harness.create_processor());
+    await pick(harness.create_processor());
+    harness.reschedule_appointment.mockRejectedValueOnce(
+      new AppointmentVersionConflictError(APPOINTMENT_ID),
+    );
+
+    const [draft] = await harness.create_processor().process(
+      button_turn({ wamid: "wamid-version-conflict", button_id: "confirm_move_g1" }),
+    );
+
+    expect(draft?.text).toContain("team");
+    expect(harness.release_hold).toHaveBeenCalledWith("hold-for-slot-1");
+    expect(await harness.session_store.load({ tenant_id: "42", conversation_id: "conversation-1" }))
+      .toMatchObject({ phase: "handoff", appointment_id: APPOINTMENT_ID });
   });
 
   it("holds a current pick with a stable key and returns exact reconfirm buttons", async () => {
@@ -189,7 +305,7 @@ describe("reschedule turn processor", () => {
     const harness = make_harness();
     await offer(harness.create_processor());
     await pick(harness.create_processor());
-    harness.confirm_hold.mockRejectedValueOnce(new HoldExpiredError("hold-for-slot-1"));
+    harness.reschedule_appointment.mockRejectedValueOnce(new HoldExpiredError("hold-for-slot-1"));
 
     const [draft] = await harness.create_processor().process(
       button_turn({ wamid: "wamid-expired-confirm", button_id: "confirm_move_g1" }),
@@ -200,7 +316,7 @@ describe("reschedule turn processor", () => {
       "pick_slot_2_g2",
       "change_day_g2",
     ]);
-    expect(harness.confirm_hold).toHaveBeenCalledTimes(1);
+    expect(harness.reschedule_appointment).toHaveBeenCalledTimes(1);
     expect((await harness.session_store.load({ tenant_id: "42", conversation_id: "conversation-1" }))?.phase)
       .toBe("offered");
   });
@@ -209,7 +325,7 @@ describe("reschedule turn processor", () => {
     const harness = make_harness();
     await offer(harness.create_processor());
     await pick(harness.create_processor());
-    harness.confirm_hold.mockRejectedValueOnce(new SlotUnavailableError("slot-1"));
+    harness.reschedule_appointment.mockRejectedValueOnce(new SlotUnavailableError("slot-1"));
 
     const [draft] = await harness.create_processor().process(
       button_turn({ wamid: "wamid-confirm-conflict", button_id: "confirm_move_g1" }),
@@ -250,11 +366,16 @@ describe("reschedule turn processor", () => {
     expect(draft?.text).toBe("Your appointment change is confirmed.");
     expect(draft).not.toHaveProperty("customer_confirmed");
     expect(draft).not.toHaveProperty("is_state_changing");
-    expect(harness.confirm_hold).toHaveBeenCalledTimes(1);
-    expect(harness.confirm_hold).toHaveBeenCalledWith(
-      "hold-for-slot-1",
-      expect.stringMatching(/^reschedule-confirm-v1:[a-f0-9]{64}$/),
-    );
+    expect(harness.reschedule_appointment).toHaveBeenCalledTimes(1);
+    expect(harness.reschedule_appointment).toHaveBeenCalledWith({
+      tenant_id: "42",
+      appointment_id: APPOINTMENT_ID,
+      expected_version: 1,
+      hold_id: "hold-for-slot-1",
+      target_slot_id: "slot-1",
+      idempotency_key: expect.stringMatching(/^reschedule-reschedule-v1:[a-f0-9]{64}$/),
+    });
+    expect(harness.confirm_hold).not.toHaveBeenCalled();
     expect((await harness.session_store.load({ tenant_id: "42", conversation_id: "conversation-1" }))?.phase)
       .toBe("confirmed");
   });
@@ -268,7 +389,7 @@ describe("reschedule turn processor", () => {
     const [replay] = await harness.create_processor().process(duplicate);
 
     expect(replay?.text).toBe("Your appointment change is confirmed.");
-    expect(harness.confirm_hold).toHaveBeenCalledTimes(1);
+    expect(harness.reschedule_appointment).toHaveBeenCalledTimes(1);
   });
 
   it("releases only the current held slot on confirm_cancel", async () => {
@@ -315,7 +436,7 @@ describe("reschedule turn processor", () => {
 
     expect(draft?.text).toBe("Your appointment change is confirmed.");
     expect(harness.hold_slot).toHaveBeenCalledTimes(1);
-    expect(harness.confirm_hold).toHaveBeenCalledTimes(1);
+    expect(harness.reschedule_appointment).toHaveBeenCalledTimes(1);
   });
 
   it("releases the losing hold when concurrent picks conflict on one session version", async () => {

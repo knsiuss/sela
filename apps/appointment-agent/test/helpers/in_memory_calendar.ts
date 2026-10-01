@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 import {
   HoldExpiredError,
+  RescheduleNotSupportedError,
   SlotUnavailableError,
   type CalendarPort,
+  type RescheduleAppointmentCommand,
+  type RescheduleAppointmentResult,
 } from "../../src/tools/calendar.js";
 import type { SlotHold, TimeSlot } from "../../src/state.js";
 
@@ -61,6 +64,13 @@ export class InMemoryCalendar implements CalendarPort {
     }
     this.confirmed.add(hold.slot_id);
     this.holds.delete(hold_id);
+  }
+
+  /** Fail closed because this helper does not model an appointment repository. */
+  async reschedule_appointment(
+    _command: RescheduleAppointmentCommand,
+  ): Promise<RescheduleAppointmentResult> {
+    throw new RescheduleNotSupportedError();
   }
 
   /** Release a test hold; unknown ids are idempotent. */

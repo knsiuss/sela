@@ -64,6 +64,8 @@ export const retained_inbound_message_schema = z.object({
   text_body: z.string().min(1).max(MAX_FREE_TEXT_CHARS),
   message_kind: z.enum(["text", "button_reply"]),
   button_id: z.string().min(1).max(64).optional(),
+  /** Trusted server-side context; never parsed from customer text. */
+  appointment_id: z.string().uuid().optional(),
   sent_at_iso: z.string().min(1),
 });
 

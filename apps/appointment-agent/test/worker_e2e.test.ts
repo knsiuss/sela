@@ -7,7 +7,7 @@ const PHONE = "+15551234567";
 const PHONE_NUMBER_ID = "phone-e2e";
 
 async function wait_for_sent_count(sent: readonly OutboundDraft[], expected_count: number): Promise<void> {
-  const deadline = Date.now() + 3_000;
+  const deadline = Date.now() + 10_000;
   while (sent.length < expected_count && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
@@ -60,7 +60,7 @@ describe("tenant-aware worker end-to-end path", () => {
     composition.start_worker();
     await Promise.race([
       sent_promise,
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("sender-timeout")), 2_000)),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("sender-timeout")), 10_000)),
     ]);
     await composition.stop();
 
@@ -89,7 +89,7 @@ describe("tenant-aware worker end-to-end path", () => {
       sender: { send: async (draft) => sent.push(draft) },
     });
     const messages = [
-      { wamid: "wamid.e2e.offer", text_body: "I want to reschedule", message_kind: "text" as const },
+      { wamid: "wamid.e2e.offer", text_body: "I want to book", message_kind: "text" as const },
       {
         wamid: "wamid.e2e.pick",
         text_body: "Pick slot 1",

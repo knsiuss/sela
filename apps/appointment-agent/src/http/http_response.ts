@@ -13,6 +13,11 @@ import {
   WebhookQueueError,
   WebhookSignatureError,
 } from "../webhook_handler.js";
+import { OutboundLedgerError } from "../outbound/outbound_ledger.js";
+import {
+  RateLimitExceededError,
+  RateLimiterUnavailableError,
+} from "../rate_limit/tenant_rate_limiter.js";
 import {
   RequestBodyTooLargeError,
   RequestReadError,
@@ -30,6 +35,7 @@ export const HTTP_STATUS = {
   METHOD_NOT_ALLOWED: 405,
   PAYLOAD_TOO_LARGE: 413,
   INTERNAL_SERVER_ERROR: 500,
+  TOO_MANY_REQUESTS: 429,
   SERVICE_UNAVAILABLE: 503,
 } as const;
 
@@ -38,6 +44,7 @@ export interface HttpResponse {
   body: Buffer | string;
   content_type: string;
   allow?: string;
+  retry_after_seconds?: number;
 }
 
 /** Signals that processing exceeded the bounded HTTP response budget. */
@@ -82,6 +89,15 @@ export function error_response(error: unknown): HttpResponse {
   if (error instanceof InvalidWebhookPayloadError || error instanceof RequestReadError) {
     return json_response(HTTP_STATUS.BAD_REQUEST, { error: "invalid_webhook_payload" });
   }
+  if (error instanceof RateLimitExceededError) {
+    return {
+      ...json_response(HTTP_STATUS.TOO_MANY_REQUESTS, { error: "rate_limited" }),
+      retry_after_seconds: error.decision.retry_after_seconds,
+    };
+  }
+  if (error instanceof RateLimiterUnavailableError || error instanceof OutboundLedgerError) {
+    return json_response(HTTP_STATUS.SERVICE_UNAVAILABLE, { error: "webhook_temporarily_unavailable" });
+  }
   if (
     error instanceof WebhookQueueError ||
     error instanceof DedupeStoreError ||
@@ -108,6 +124,9 @@ export function send_response(response: ServerResponse, result: HttpResponse): v
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("Content-Type", result.content_type);
   if (result.allow !== undefined) response.setHeader("Allow", result.allow);
+  if (result.retry_after_seconds !== undefined) {
+    response.setHeader("Retry-After", String(Math.max(1, Math.ceil(result.retry_after_seconds))));
+  }
   const body = Buffer.isBuffer(result.body) ? result.body : Buffer.from(result.body, "utf8");
   response.setHeader("Content-Length", body.byteLength);
   response.end(body);

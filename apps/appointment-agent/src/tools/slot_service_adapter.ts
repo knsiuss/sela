@@ -8,8 +8,11 @@ import {
 import type { SlotHold, TimeSlot } from "../state.js";
 import {
   HoldExpiredError,
+  RescheduleNotSupportedError,
   SlotUnavailableError,
   type CalendarPort,
+  type RescheduleAppointmentCommand,
+  type RescheduleAppointmentResult,
 } from "./calendar.js";
 import { clamp_hold_ttl_seconds, HOLD_TTL_SECONDS } from "./hold_ttl.js";
 
@@ -176,6 +179,20 @@ export class SlotServiceAdapter implements CalendarPort {
     const slot_id = this.hold_slot_by_id.get(hold_id);
     if (slot_id !== undefined) this.appointment_id_by_booking_id.set(slot_id, appointment.id);
     this.forget_hold(hold_id);
+  }
+
+  /**
+   * Fail closed because the process-local package store is not authoritative.
+   *
+   * @param command - Validated tenant-scoped reschedule request.
+   * @returns Never returns.
+   * @throws RescheduleNotSupportedError for every request.
+   */
+  async reschedule_appointment(
+    command: RescheduleAppointmentCommand,
+  ): Promise<RescheduleAppointmentResult> {
+    void command;
+    throw new RescheduleNotSupportedError();
   }
 
   /**

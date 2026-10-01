@@ -23,6 +23,8 @@ const SLOT = {
 function state(overrides: Partial<RescheduleSessionState> = {}): RescheduleSessionState {
   return {
     phase: "offered",
+    appointment_id: null,
+    source_appointment_version: null,
     candidate_slots: [SLOT],
     chosen_slot_id: null,
     hold_id: null,
@@ -39,6 +41,8 @@ function database_row(overrides: Record<string, unknown> = {}): Record<string, u
     tenant_id: 42,
     conversation_id: "conversation-1",
     phase: "offered",
+    appointment_id: null,
+    source_appointment_version: null,
     candidate_slots: [SLOT],
     chosen_slot_id: null,
     hold_id: null,
@@ -121,7 +125,9 @@ describe("reschedule session store", () => {
       }
       return { rows: [database_row()], rowCount: 1 };
     });
-    const store = new PostgresRescheduleSessionStore({ query } satisfies SqlClient);
+    const store = new PostgresRescheduleSessionStore({ query } satisfies SqlClient, {
+      clock: () => new Date(NOW_ISO),
+    });
     const scope = { tenant_id: "42", conversation_id: "conversation-1" };
 
     await expect(store.load(scope)).resolves.toMatchObject({ tenant_id: "42", version: 1 });
@@ -136,6 +142,8 @@ describe("reschedule session store", () => {
       "42",
       "conversation-1",
       "offered",
+      null,
+      null,
       JSON.stringify([SLOT]),
       null,
       null,
@@ -144,7 +152,7 @@ describe("reschedule session store", () => {
       "wamid-1",
       FUTURE_ISO,
     ]);
-    expect(query.mock.calls[2]?.[1]?.[10]).toBe(1);
+    expect(query.mock.calls[2]?.[1]?.[12]).toBe(1);
     for (const [sql, values] of query.mock.calls) {
       expect(sql).not.toContain("message_text");
       expect(sql).not.toContain("phone");
@@ -166,7 +174,10 @@ describe("reschedule session store", () => {
 
   it("returns null for a Postgres version conflict and wraps driver failures safely", async () => {
     const conflict_query = vi.fn(async () => ({ rows: [], rowCount: 0 }));
-    const conflict_store = new PostgresRescheduleSessionStore({ query: conflict_query } satisfies SqlClient);
+    const conflict_store = new PostgresRescheduleSessionStore(
+      { query: conflict_query } satisfies SqlClient,
+      { clock: () => new Date(NOW_ISO) },
+    );
     await expect(
       conflict_store.commit({ tenant_id: "42", conversation_id: "conversation-1" }, state(), 9),
     ).resolves.toBeNull();

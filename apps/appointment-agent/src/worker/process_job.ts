@@ -11,9 +11,13 @@ import { build_outbound_drafts } from "../outbound/reply_builder.js";
 import type { CalendarPort } from "../tools/calendar.js";
 import type { InboundMessageRecord } from "../ingress/inbound_store.js";
 import type { RecipientCipher } from "../security/recipient_cipher.js";
+import { is_tenant_bound } from "../security/rotating_recipient_cipher.js";
 import type { InboundLoader } from "./inbound_loader.js";
 import type { ClaimedWebhookJob } from "./job_claim.js";
 import type { JobLifecycleStore } from "./job_store.js";
+import type { MetricsSink } from "../observability/metrics.js";
+import { RateLimitExceededError } from "../rate_limit/tenant_rate_limiter.js";
+import { OutboundLedgerNotReadyError } from "../outbound/outbound_ledger.js";
 
 const MAX_INBOUND_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
@@ -103,6 +107,8 @@ export interface ProcessJobInput {
   turn_processor?: TurnProcessor;
   /** Delivers drafts for this job's tenant before the inbound row and job are marked processed. */
   deliver?: (tenant_id: string, drafts: readonly OutboundDraft[]) => Promise<void>;
+  /** Optional bounded metrics sink; no message or recipient labels are allowed. */
+  metrics?: MetricsSink;
   max_attempts?: number;
   clock?: () => Date;
 }
@@ -176,7 +182,11 @@ export async function process_job(input: ProcessJobInput): Promise<OutboundDraft
 
   let reply_target: string;
   try {
-    reply_target = input.recipient_cipher.decrypt(record.reply_target_ciphertext);
+    reply_target = decrypt_reply_target(
+      input.recipient_cipher,
+      record.reply_target_ciphertext,
+      tenant_id,
+    );
   } catch {
     await fail_with_retry(input, "reply_target_unavailable");
     throw new JobProcessingError("reply_target_unavailable");
@@ -188,12 +198,31 @@ export async function process_job(input: ProcessJobInput): Promise<OutboundDraft
     if (input.deliver !== undefined) await input.deliver(tenant_id, drafts);
     await mark_processed(input.inbound_loader, record, clock);
     await input.lifecycle.complete(input.job);
+    input.metrics?.increment("worker_jobs_total", { result: "processed" });
     return drafts;
   } catch (error) {
     const code = sanitize_error_code(error);
-    await fail_with_retry(input, code);
+    await fail_with_retry(input, code, retry_at_for_error(error));
+    input.metrics?.increment("worker_jobs_total", { result: "failed" });
     throw new JobProcessingError(code);
   }
+}
+
+/**
+ * Decrypt a reply target for its owning tenant when the cipher supports it.
+ *
+ * @param cipher - Injected recipient cipher.
+ * @param reply_target_ciphertext - Opaque ciphertext loaded from storage.
+ * @param tenant_id - Owning tenant expected by the encryption context.
+ * @returns Strict E.164 recipient for immediate outbound use only.
+ */
+function decrypt_reply_target(
+  cipher: RecipientCipher,
+  reply_target_ciphertext: string,
+  tenant_id: string,
+): string {
+  if (is_tenant_bound(cipher)) return cipher.decrypt_for_tenant(reply_target_ciphertext, tenant_id);
+  return cipher.decrypt(reply_target_ciphertext);
 }
 
 async function build_turn_drafts(
@@ -237,12 +266,22 @@ async function complete_or_retry(input: ProcessJobInput): Promise<void> {
   }
 }
 
-async function fail_with_retry(input: ProcessJobInput, code: string): Promise<void> {
+async function fail_with_retry(
+  input: ProcessJobInput,
+  code: string,
+  retry_at_override?: Date,
+): Promise<void> {
   const max_attempts = positive_integer(input.max_attempts ?? 3, "max_attempts");
   const retry_at = input.job.attempts < max_attempts
-    ? retry_time((input.clock ?? (() => new Date()))(), input.job.attempts)
+    ? retry_at_override ?? retry_time((input.clock ?? (() => new Date()))(), input.job.attempts)
     : undefined;
   await input.lifecycle.fail(input.job, code, retry_at);
+}
+
+function retry_at_for_error(error: unknown): Date | undefined {
+  if (error instanceof RateLimitExceededError) return error.retry_at;
+  if (error instanceof OutboundLedgerNotReadyError) return error.retry_at;
+  return undefined;
 }
 
 async function mark_processed(
@@ -263,6 +302,7 @@ function to_inbound_message(record: InboundMessageRecord): RetainedInboundMessag
     text_body: record.message_text,
     message_kind: record.message_type === "button_reply" ? "button_reply" : "text",
     button_id: record.button_id ?? undefined,
+    appointment_id: record.appointment_id ?? undefined,
     sent_at_iso: record.received_at,
   });
   if (!parsed.success) throw new JobProcessingError("invalid_inbound_message");

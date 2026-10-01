@@ -4,12 +4,23 @@ import {
   type Server as NodeHttpServer,
   type ServerResponse,
 } from "node:http";
+import { performance } from "node:perf_hooks";
 import type { MessageDedupeStore } from "../ingress/dedupe.js";
 import type { InboundMessageStore } from "../ingress/inbound_store.js";
 import type { AtomicIngressStore } from "../ingress/postgres_atomic_ingress.js";
 import type { TenantResolver } from "../ingress/tenant_resolver.js";
 import type { RecipientCipher } from "../security/recipient_cipher.js";
+import type { MetricsRegistry } from "../observability/metrics.js";
+import { collect_runtime_gauges, type RuntimeGaugeProviders } from "../observability/collectors.js";
 import { continue_trace, format_traceparent } from "../observability/trace.js";
+import type { TenantRateLimiter } from "../rate_limit/tenant_rate_limiter.js";
+import type { OutboundLedgerStore } from "../outbound/outbound_ledger.js";
+import {
+  handle_operator_action,
+  MAX_OPERATOR_BODY_BYTES,
+  type OperatorApiOptions,
+  type OperatorApiResponse,
+} from "./operator_api.js";
 import {
   is_valid_signature,
 } from "../ingress/verify.js";
@@ -40,6 +51,8 @@ import {
 
 export const WEBHOOK_PATH = "/webhooks/whatsapp";
 export const HEALTH_PATH = "/healthz";
+export const METRICS_PATH = "/metrics";
+export const OPERATOR_ACTIONS_PATH = "/v1/operator/actions";
 export const DEFAULT_SERVER_PORT = 3000;
 export const DEFAULT_SERVER_HOST = "0.0.0.0";
 export const WEBHOOK_RESPONSE_DEADLINE_MS = 2_500;
@@ -62,6 +75,15 @@ export interface HttpServerDependencies {
   inbound_store?: InboundMessageStore;
   recipient_cipher?: RecipientCipher;
   inbound_retention_days?: number;
+  rate_limiter?: TenantRateLimiter;
+  outbound_ledger?: OutboundLedgerStore;
+  metrics?: MetricsRegistry;
+  /** Optional runtime gauge providers scraped on each /metrics request. */
+  gauge_providers?: RuntimeGaugeProviders;
+  inbound_rate_limit?: number;
+  inbound_rate_window_seconds?: number;
+  operator_handler?: typeof handle_operator_action;
+  operator_api_options?: OperatorApiOptions;
   inbound_handler?: typeof handle_inbound_request;
 }
 
@@ -164,6 +186,11 @@ async function webhook_response(
       inbound_store: dependencies.inbound_store,
       recipient_cipher: dependencies.recipient_cipher,
       retention_days: dependencies.inbound_retention_days,
+      rate_limiter: dependencies.rate_limiter,
+      outbound_ledger: dependencies.outbound_ledger,
+      metrics: dependencies.metrics,
+      inbound_rate_limit: dependencies.inbound_rate_limit,
+      inbound_rate_window_seconds: dependencies.inbound_rate_window_seconds,
     },
   );
   return json_response(HTTP_STATUS.OK, result);
@@ -192,6 +219,24 @@ function with_deadline<T>(
   });
 }
 
+async function operator_response(
+  request: IncomingMessage,
+  dependencies: HttpServerDependencies,
+): Promise<HttpResponse> {
+  if (dependencies.operator_handler === undefined || dependencies.operator_api_options === undefined) {
+    return json_response(HTTP_STATUS.NOT_FOUND, { error: "not_found" });
+  }
+  const raw_body = await read_raw_body(request, MAX_OPERATOR_BODY_BYTES);
+  const result: OperatorApiResponse = await dependencies.operator_handler(
+    request.method ?? "",
+    new URL(request.url ?? "/", "http://localhost").pathname,
+    request.headers,
+    raw_body,
+    dependencies.operator_api_options,
+  );
+  return json_response(result.status, result.body);
+}
+
 async function create_response(
   request: IncomingMessage,
   config: HttpServerConfig,
@@ -203,6 +248,12 @@ async function create_response(
     if (method !== "GET") throw new MethodNotAllowedError("GET");
     return text_response(HTTP_STATUS.OK, "ok");
   }
+  if (url.pathname === METRICS_PATH) {
+    if (method !== "GET") throw new MethodNotAllowedError("GET");
+    collect_runtime_gauges(dependencies.metrics, dependencies.gauge_providers ?? {});
+    return text_response(HTTP_STATUS.OK, dependencies.metrics?.render_prometheus() ?? "");
+  }
+  if (url.pathname === OPERATOR_ACTIONS_PATH) return operator_response(request, dependencies);
   if (url.pathname !== WEBHOOK_PATH) return json_response(HTTP_STATUS.NOT_FOUND, { error: "not_found" });
   if (method === "GET") return verification_response(request, config);
   if (method === "POST") {
@@ -217,7 +268,7 @@ async function create_response(
 function safe_path(request: IncomingMessage): string {
   try {
     const path = new URL(request.url ?? "/", "http://localhost").pathname;
-    return path === WEBHOOK_PATH || path === HEALTH_PATH ? path : "unknown";
+    return path === WEBHOOK_PATH || path === HEALTH_PATH || path === METRICS_PATH || path === OPERATOR_ACTIONS_PATH ? path : "unknown";
   } catch {
     return "unknown";
   }
@@ -254,14 +305,29 @@ async function handle_http_request(
   const request_id = generate_request_id();
   const trace = continue_trace(get_single_header(request, "traceparent"), request_id);
   response.setHeader("traceparent", format_traceparent(trace));
+  const started_ms = performance.now();
   try {
     const result = await create_response(request, config, dependencies);
+    record_http_metrics(dependencies.metrics, request, result.status, started_ms);
     send_response(response, result);
   } catch (error) {
     const result = error_response(error);
+    record_http_metrics(dependencies.metrics, request, result.status, started_ms);
     log_server_error(request, request_id, trace.trace_id, result.status, error);
     send_response(response, result);
   }
+}
+
+function record_http_metrics(
+  metrics: MetricsRegistry | undefined,
+  request: IncomingMessage,
+  status: number,
+  started_ms: number,
+): void {
+  if (metrics === undefined) return;
+  const path = safe_path(request);
+  metrics.increment("http_requests_total", { method: request.method ?? "UNKNOWN", path, status: String(status) });
+  metrics.observe("http_request_duration_ms", performance.now() - started_ms, { method: request.method ?? "UNKNOWN", path });
 }
 
 /**

@@ -29,25 +29,54 @@ export class MetricsRegistry implements MetricsSink {
   private readonly gauges = new Map<string, number>();
   private readonly histograms = new Map<string, HistogramValue>();
 
-  /** Increment a counter by a finite non-negative amount. */
+  /**
+   * Increment a counter by a finite non-negative amount.
+   *
+   * Fail-loud by design (AGENTS.md: fail fast and loud): a silently dropped
+   * metric hides production incidents, so invalid values throw RangeError
+   * and callers must validate before recording. Name and label shape errors
+   * throw TypeError from the shared series key.
+   *
+   * @param name - Counter name, Prometheus-compatible.
+   * @param labels - PII-free label set.
+   * @param value - Non-negative finite increment, defaults to 1.
+   */
   increment(name: string, labels: Readonly<Record<string, string>> = {}, value = 1): void {
-    if (!Number.isFinite(value) || value < 0) return;
+    require_metric_value(value, "metric-value-invalid");
     const key = series_key(name, labels);
     ensure_capacity(this.counters, key);
     this.counters.set(key, (this.counters.get(key) ?? 0) + value);
   }
 
-  /** Set a finite gauge value. */
+  /**
+   * Set a finite gauge value.
+   *
+   * Fail-loud by design: invalid values throw RangeError instead of
+   * disappearing, so dashboards never silently freeze on a bad writer.
+   *
+   * @param name - Gauge name, Prometheus-compatible.
+   * @param value - Finite gauge reading.
+   * @param labels - PII-free label set.
+   */
   set_gauge(name: string, value: number, labels: Readonly<Record<string, string>> = {}): void {
-    if (!Number.isFinite(value)) return;
+    require_finite_value(value, "metric-value-invalid");
     const key = series_key(name, labels);
     ensure_capacity(this.gauges, key);
     this.gauges.set(key, value);
   }
 
-  /** Observe a duration in milliseconds using fixed latency buckets. */
+  /**
+   * Observe a duration in milliseconds using fixed latency buckets.
+   *
+   * Fail-loud by design: negative or non-finite durations throw RangeError
+   * instead of skewing latency histograms silently.
+   *
+   * @param name - Histogram name, Prometheus-compatible.
+   * @param value_ms - Non-negative finite duration in milliseconds.
+   * @param labels - PII-free label set.
+   */
   observe(name: string, value_ms: number, labels: Readonly<Record<string, string>> = {}): void {
-    if (!Number.isFinite(value_ms) || value_ms < 0) return;
+    require_metric_value(value_ms, "metric-value-invalid");
     const key = series_key(name, labels);
     ensure_capacity(this.histograms, key);
     const current = this.histograms.get(key) ?? {
@@ -105,6 +134,16 @@ export class MetricsRegistry implements MetricsSink {
 
 function ensure_capacity<T>(store: Map<string, T>, key: string): void {
   if (!store.has(key) && store.size >= MAX_SERIES) throw new Error("metrics-series-limit-exceeded");
+}
+
+/** Throw RangeError unless the value is a finite non-negative metric amount. */
+function require_metric_value(value: number, reason: string): void {
+  if (!Number.isFinite(value) || value < 0) throw new RangeError(reason);
+}
+
+/** Throw RangeError unless the value is a finite gauge reading. */
+function require_finite_value(value: number, reason: string): void {
+  if (!Number.isFinite(value)) throw new RangeError(reason);
 }
 
 function metric_line(

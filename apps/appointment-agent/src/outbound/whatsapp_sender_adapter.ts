@@ -66,7 +66,11 @@ function to_outbound_message(draft: OutboundDraft): OutboundMessage {
   const buttons = (draft.buttons ?? []).map(to_outbound_button);
   const common = {
     to: draft.to,
-    ...(draft.idempotency_key === undefined ? {} : { idempotency_key: draft.idempotency_key }),
+    // A reply with trusted inbound identity must derive the provider key from
+    // that identity; caller-supplied keys are not authoritative at this boundary.
+    ...(draft.inbound_wamid === undefined && draft.idempotency_key !== undefined
+      ? { idempotency_key: draft.idempotency_key }
+      : {}),
     ...(draft.inbound_wamid === undefined ? {} : { inbound_wamid: draft.inbound_wamid }),
     ...(draft.turn_id === undefined ? {} : { turn_id: draft.turn_id }),
     ...(draft.is_state_changing === undefined ? {} : { is_state_changing: draft.is_state_changing }),

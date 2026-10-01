@@ -8,7 +8,14 @@ import {
   type GoogleFreebusyResponse,
 } from "@repo/mcp-gcal";
 import type { SlotHold, TimeSlot } from "../state.js";
-import { HoldExpiredError, SlotUnavailableError, type CalendarPort } from "./calendar.js";
+import {
+  HoldExpiredError,
+  RescheduleNotSupportedError,
+  SlotUnavailableError,
+  type CalendarPort,
+  type RescheduleAppointmentCommand,
+  type RescheduleAppointmentResult,
+} from "./calendar.js";
 import { clamp_hold_ttl_seconds } from "./hold_ttl.js";
 import {
   build_working_slot_windows,
@@ -195,6 +202,21 @@ export class GoogleCalendarAdapter implements CalendarPort {
     } finally {
       stored_hold.confirmation = undefined;
     }
+  }
+
+  /**
+   * Fail closed because Google Calendar metadata cannot replace a local source
+   * appointment atomically.
+   *
+   * @param command - Validated tenant-scoped reschedule request.
+   * @returns Never returns.
+   * @throws RescheduleNotSupportedError for every request.
+   */
+  async reschedule_appointment(
+    command: RescheduleAppointmentCommand,
+  ): Promise<RescheduleAppointmentResult> {
+    void command;
+    throw new RescheduleNotSupportedError();
   }
 
   /** Delete a held event; releasing an unknown or already absent hold is safe. */

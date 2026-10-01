@@ -8,6 +8,7 @@ import {
 import type { InboundMessage } from "../src/agent_types.js";
 import type { SqlClient } from "../src/persistence/sql_client.js";
 import { AesGcmRecipientCipher } from "../src/security/recipient_cipher.js";
+import { RotatingRecipientCipher } from "../src/security/rotating_recipient_cipher.js";
 
 const RECIPIENT_CIPHER = new AesGcmRecipientCipher(Buffer.alloc(32, 3));
 const SERVER_RECEIVED_AT = "2026-09-24T08:00:00.000Z";
@@ -54,6 +55,32 @@ describe("inbound message store", () => {
     });
   });
 
+  it("retains only explicitly supplied trusted appointment context", () => {
+    const appointment_id = "10000000-0000-4000-8000-000000000001";
+    const result = build_inbound_message_record({
+      tenant_id: "42",
+      message: MESSAGE,
+      recipient_cipher: RECIPIENT_CIPHER,
+      conversation_id: "conversation-appointment-test",
+      appointment_id,
+    });
+
+    expect(result.appointment_id).toBe(appointment_id);
+    expect(build_inbound_message_record({
+      tenant_id: "42",
+      message: { ...MESSAGE, text_body: appointment_id },
+      recipient_cipher: RECIPIENT_CIPHER,
+      conversation_id: "conversation-no-context",
+    }).appointment_id).toBeNull();
+    expect(() => build_inbound_message_record({
+      tenant_id: "42",
+      message: MESSAGE,
+      recipient_cipher: RECIPIENT_CIPHER,
+      conversation_id: "conversation-invalid-context",
+      appointment_id: "not-a-uuid",
+    })).toThrow(InboundMessageStoreError);
+  });
+
   it("retains an encrypted reply target and applies the retention deadline", () => {
     const result = record("42", 7);
 
@@ -65,6 +92,29 @@ describe("inbound message store", () => {
     });
     expect(result.reply_target_ciphertext).toMatch(/^v1\./);
     expect(RECIPIENT_CIPHER.decrypt(result.reply_target_ciphertext!)).toBe(MESSAGE.sender_phone_e164);
+    expect(JSON.stringify(result)).not.toContain(MESSAGE.sender_phone_e164);
+  });
+
+  it("binds the reply target to the tenant when the cipher supports it", () => {
+    const cipher = new RotatingRecipientCipher(
+      new Map([["k1", Buffer.alloc(32, 11)]]),
+      "k1",
+    );
+    const result = build_inbound_message_record({
+      tenant_id: "42",
+      message: MESSAGE,
+      recipient_cipher: cipher,
+      conversation_id: "conversation-tenant-bound",
+      now: SERVER_RECEIVED_AT,
+    });
+
+    expect(result.reply_target_ciphertext).toMatch(/^v2\.k1\./);
+    expect(cipher.decrypt_for_tenant(result.reply_target_ciphertext!, "42")).toBe(
+      MESSAGE.sender_phone_e164,
+    );
+    expect(() => cipher.decrypt_for_tenant(result.reply_target_ciphertext!, "43")).toThrow(
+      "recipient_decryption_failed",
+    );
     expect(JSON.stringify(result)).not.toContain(MESSAGE.sender_phone_e164);
   });
 
@@ -163,6 +213,7 @@ describe("inbound message store", () => {
       MESSAGE.wamid,
       "conversation-test",
       "text",
+      null,
       null,
       "sender-reference-test",
       saved.reply_target_ciphertext,

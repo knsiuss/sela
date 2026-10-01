@@ -2,6 +2,7 @@
 
 import type { InboundMessage } from "../agent_types.js";
 import type { SqlClient, SqlQueryResult } from "../persistence/sql_client.js";
+import { is_tenant_bound, type TenantBoundRecipientCipher } from "../security/rotating_recipient_cipher.js";
 import type { RecipientCipher } from "../security/recipient_cipher.js";
 
 /** Default retention period for message text, sender references, and encrypted targets. */
@@ -28,6 +29,8 @@ export interface InboundMessageRecord {
   message_type: string;
   /** Validated quick-reply action id, or null for text and legacy rows. */
   button_id: string | null;
+  /** Trusted server-side appointment context; never inferred from message text. */
+  appointment_id?: string | null;
   /** Opaque sender reference; raw phone numbers are not stored here. */
   sender_ref: string;
   /** Versioned encrypted reply target; null only for legacy rows. */
@@ -65,6 +68,8 @@ export function build_inbound_message_record(input: {
   recipient_cipher: RecipientCipher;
   conversation_id: string;
   sender_ref?: string;
+  /** Trusted appointment context attached by a server-side workflow. */
+  appointment_id?: string;
   retention_days?: number;
   /** Server receipt timestamp used as the retention base. */
   now?: string;
@@ -73,7 +78,7 @@ export function build_inbound_message_record(input: {
   const conversation_id = require_id(input.conversation_id, "conversation_id");
   const sender_ref = require_id(input.sender_ref ?? input.conversation_id, "sender_ref");
   const reply_target_ciphertext = require_reply_target_ciphertext(
-    input.recipient_cipher.encrypt(input.message.sender_phone_e164),
+    encrypt_reply_target(input.recipient_cipher, input.message.sender_phone_e164, tenant_id),
   );
   const received_at = valid_timestamp(input.message.sent_at_iso, "received_at");
   // Provider clocks can be stale or ahead; retention must follow server receipt time.
@@ -94,6 +99,7 @@ export function build_inbound_message_record(input: {
     conversation_id,
     message_type: input.message.message_kind,
     button_id: input.message.button_id ?? null,
+    appointment_id: nullable_appointment_id(input.appointment_id),
     sender_ref,
     reply_target_ciphertext,
     message_text: require_text(input.message.text_body, "message_text"),
@@ -105,16 +111,16 @@ export function build_inbound_message_record(input: {
 
 const INSERT_INBOUND_SQL = `
   INSERT INTO inbound_messages (
-    tenant_id, wamid, conversation_id, message_type, button_id, sender_ref,
+    tenant_id, wamid, conversation_id, message_type, button_id, appointment_id, sender_ref,
     reply_target_ciphertext, message_text, received_at, expires_at
   )
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
   ON CONFLICT (tenant_id, wamid) DO NOTHING
   RETURNING id
 `;
 
 const SELECT_INBOUND_SQL = `
-  SELECT tenant_id, wamid, conversation_id, message_type, button_id, sender_ref,
+  SELECT tenant_id, wamid, conversation_id, message_type, button_id, appointment_id, sender_ref,
          reply_target_ciphertext, message_text, received_at, expires_at, processed_at
   FROM inbound_messages
   WHERE tenant_id = $1 AND wamid = $2
@@ -251,6 +257,7 @@ export class PostgresInboundMessageStore implements InboundMessageStore {
         record.conversation_id,
         record.message_type,
         record.button_id,
+        record.appointment_id ?? null,
         record.sender_ref,
         record.reply_target_ciphertext,
         record.message_text,
@@ -323,6 +330,7 @@ function normalize_row(row: Record<string, unknown>): InboundMessageRecord {
     conversation_id: require_id(string_value(row["conversation_id"]), "conversation_id"),
     message_type: require_text(string_value(row["message_type"]), "message_type"),
     button_id: nullable_button_id(row["button_id"]),
+    appointment_id: nullable_appointment_id(row["appointment_id"]),
     sender_ref: require_id(string_value(row["sender_ref"]), "sender_ref"),
     reply_target_ciphertext: nullable_reply_target(row["reply_target_ciphertext"]),
     message_text: require_text(string_value(row["message_text"]), "message_text"),
@@ -347,6 +355,7 @@ function validate_record(record: InboundMessageRecord): void {
     throw new InboundMessageStoreError("inbound-message_type-invalid");
   }
   if (record.button_id !== null) require_button_id(record.button_id);
+  nullable_appointment_id(record.appointment_id);
   require_id(record.sender_ref, "sender_ref");
   if (record.reply_target_ciphertext !== null) {
     require_reply_target_ciphertext(record.reply_target_ciphertext);
@@ -378,6 +387,25 @@ function require_text(value: string, field_name: string): string {
   return value;
 }
 
+/**
+ * Encrypt a reply target, binding the tenant when the cipher supports it.
+ *
+ * @param cipher - Injected recipient cipher.
+ * @param sender_phone_e164 - Untrusted sender phone in strict E.164.
+ * @param tenant_id - Owning tenant for encryption-context binding.
+ * @returns Opaque versioned ciphertext.
+ */
+function encrypt_reply_target(
+  cipher: RecipientCipher,
+  sender_phone_e164: string,
+  tenant_id: string,
+): string {
+  const bound: TenantBoundRecipientCipher | null = is_tenant_bound(cipher) ? cipher : null;
+  return bound === null
+    ? cipher.encrypt(sender_phone_e164)
+    : bound.encrypt_for_tenant(sender_phone_e164, tenant_id);
+}
+
 function require_reply_target_ciphertext(value: string | null): string {
   if (typeof value !== "string" || value.length === 0 || value.length > 512) {
     throw new InboundMessageStoreError("inbound-reply-target-invalid");
@@ -400,6 +428,15 @@ function require_button_id(value: string): string {
 function nullable_button_id(value: unknown): string | null {
   if (value === undefined || value === null) return null;
   return require_button_id(string_value(value));
+}
+
+function nullable_appointment_id(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  const appointment_id = require_id(string_value(value), "appointment_id");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(appointment_id)) {
+    throw new InboundMessageStoreError("inbound-appointment_id-invalid");
+  }
+  return appointment_id;
 }
 
 function valid_timestamp(value: string, field_name: string): string {

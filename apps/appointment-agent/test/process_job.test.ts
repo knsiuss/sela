@@ -39,6 +39,10 @@ const JOB: ClaimedWebhookJob = {
   attempts: 1,
 };
 
+// Fixture clock pinned inside the 24-hour service window so the suite is
+// stable regardless of the real wall-clock date when tests execute.
+const TEST_CLOCK = () => new Date("2026-09-24T08:30:00.000Z");
+
 function final_state(overrides: Partial<AppointmentStateType> = {}): AppointmentStateType {
   return {
     conversation_id: RECORD.conversation_id,
@@ -98,6 +102,7 @@ describe("process_job", () => {
       calendar: dependencies.calendar,
       lifecycle: dependencies.lifecycle,
       graph_runner: dependencies.graph,
+      clock: TEST_CLOCK,
     });
 
     expect(drafts).toEqual([
@@ -135,6 +140,7 @@ describe("process_job", () => {
       lifecycle: dependencies.lifecycle,
       graph_runner: dependencies.graph,
       deliver,
+      clock: TEST_CLOCK,
     })).resolves.toEqual([]);
 
     expect(deliver).not.toHaveBeenCalled();
@@ -162,6 +168,7 @@ describe("process_job", () => {
       graph_runner: dependencies.graph,
       turn_processor,
       deliver,
+      clock: TEST_CLOCK,
     });
 
     expect(turn_processor.process).toHaveBeenCalledWith(expect.objectContaining({
@@ -190,6 +197,7 @@ describe("process_job", () => {
       calendar: dependencies.calendar,
       lifecycle: dependencies.lifecycle,
       graph_runner: dependencies.graph,
+      clock: TEST_CLOCK,
     });
 
     expect(drafts[0]).toMatchObject({ inbound_wamid: max_length_wamid, turn_id: "0" });
@@ -214,6 +222,7 @@ describe("process_job", () => {
       calendar: dependencies.calendar,
       lifecycle: dependencies.lifecycle,
       graph_runner: dependencies.graph,
+      clock: TEST_CLOCK,
     });
 
     const graph_state = vi.mocked(dependencies.graph.invoke).mock.calls[0]?.[0];
@@ -235,6 +244,7 @@ describe("process_job", () => {
         lifecycle: dependencies.lifecycle,
         graph_runner: dependencies.graph,
         deliver,
+        clock: TEST_CLOCK,
       }),
     ).rejects.toMatchObject({ code: "outbound_delivery_failed" });
 
@@ -257,6 +267,7 @@ describe("process_job", () => {
       calendar: dependencies.calendar,
       lifecycle: dependencies.lifecycle,
       graph_runner: dependencies.graph,
+      clock: TEST_CLOCK,
     });
 
     await expect(promise).rejects.toMatchObject({
@@ -315,6 +326,7 @@ describe("process_job", () => {
       calendar: dependencies.calendar,
       lifecycle: dependencies.lifecycle,
       graph_runner: dependencies.graph,
+      clock: TEST_CLOCK,
     });
 
     await expect(promise).rejects.toMatchObject({
@@ -339,6 +351,7 @@ describe("process_job", () => {
       lifecycle: dependencies.lifecycle,
       graph_runner: dependencies.graph,
       max_attempts: 3,
+      clock: TEST_CLOCK,
     });
 
     await expect(promise).rejects.toMatchObject({
@@ -365,6 +378,7 @@ describe("process_job", () => {
       calendar: dependencies.calendar,
       lifecycle: dependencies.lifecycle,
       graph_runner: dependencies.graph,
+      clock: TEST_CLOCK,
     });
 
     await expect(promise).rejects.toBeInstanceOf(JobProcessingError);
@@ -386,6 +400,7 @@ describe("process_job", () => {
         lifecycle: terminal_dependencies.lifecycle,
         graph_runner: terminal_dependencies.graph,
         max_attempts: 3,
+        clock: TEST_CLOCK,
       }),
     ).rejects.toBeInstanceOf(JobProcessingError);
     expect(terminal_dependencies.lifecycle.fail).toHaveBeenCalledWith(
