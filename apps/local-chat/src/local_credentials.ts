@@ -99,6 +99,11 @@ export interface LocalAgentEnvInput {
   credentials: LocalCredentials;
   slots: readonly TimeSlot[];
   poll_interval_ms?: number;
+  /**
+   * Operator environment the model opt-in is read from. Defaults to the
+   * process environment; tests pass an explicit mapping instead.
+   */
+  source_env?: Record<string, string | undefined>;
 }
 
 /**
@@ -133,9 +138,36 @@ export function build_local_agent_env(input: LocalAgentEnvInput): Record<string,
     WHATSAPP_PHONE_NUMBER_ID: input.credentials.phone_number_id,
     CALENDAR_SLOTS_JSON: JSON.stringify(input.slots),
     WORKER_POLL_INTERVAL_MS: String(poll_interval_ms),
+    // Forwarded only when the operator explicitly opted in. The tool never
+    // defaults a provider and never invents a key: an unset pair keeps the
+    // agent on its regex fast path with the existing fail-closed handoff.
+    ...resolve_model_env(input.source_env),
   };
   assert_in_memory_pairing(env);
   return env;
+}
+
+/**
+ * Copy the opt-in model settings from the operator's own environment.
+ *
+ * Values are passed through verbatim and never printed; an unset or blank
+ * `LLM_PROVIDER` returns nothing so the agent stays regex-only.
+ *
+ * @param source_env - The operator environment to read from.
+ * @returns Provider and model settings, or an empty object when not opted in.
+ */
+function resolve_model_env(
+  source_env: Record<string, string | undefined> | undefined,
+): Record<string, string> {
+  if (source_env === undefined) return {};
+  const provider = source_env["LLM_PROVIDER"]?.trim() ?? "";
+  if (provider === "") return {};
+  const forwarded: Record<string, string> = { LLM_PROVIDER: provider };
+  for (const key of ["ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"]) {
+    const value = source_env[key]?.trim();
+    if (value !== undefined && value !== "") forwarded[key] = value;
+  }
+  return forwarded;
 }
 
 /**

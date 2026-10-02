@@ -5,6 +5,10 @@ import { build_operator_reply } from "../handoff.js";
 import type { AppointmentStateType, TimeSlot } from "../state.js";
 import type { OutboundDraft, OutboundDraftButton } from "../worker/process_job.js";
 
+/** Fixed English answer to a greeting; states the capabilities, asks for need. */
+export const GREETING_REPLY =
+  "Hello! I can help you book, reschedule, or cancel an appointment. What would you like to do?";
+
 /**
  * Build one channel-neutral interactive draft from validated local components.
  *
@@ -74,6 +78,12 @@ export function build_outbound_drafts(
         buttons: slot_buttons(offered_slots.length),
       },
     ];
+  }
+
+  if (state.intent === "greet") {
+    // A greeting is answered, not escalated: the customer said hello and has
+    // not asked for anything yet, so handing off would be a false escalation.
+    return [{ to, message_type: "text", text: GREETING_REPLY }];
   }
 
   if (state.intent === "confirm") {

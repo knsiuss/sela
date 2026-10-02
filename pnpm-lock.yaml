@@ -23,6 +23,9 @@ importers:
       '@langchain/langgraph':
         specifier: ^0.2.0
         version: 0.2.74(@langchain/core@0.3.80)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(zod-to-json-schema@3.25.2(zod@3.25.76))
+      '@repo/llm':
+        specifier: workspace:*
+        version: link:../../packages/llm
       '@repo/mcp-gcal':
         specifier: workspace:*
         version: link:../../packages/mcp-gcal
@@ -162,6 +165,25 @@ importers:
   packages/db: {}
 
   packages/guardrails: {}
+
+  packages/llm:
+    dependencies:
+      '@repo/rag-pipeline':
+        specifier: workspace:*
+        version: link:../rag-pipeline
+      zod:
+        specifier: ^4.6.5
+        version: 4.6.5
+    devDependencies:
+      '@types/node':
+        specifier: ^26.6.2
+        version: 26.6.2
+      typescript:
+        specifier: ^5.5.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@26.6.2)(jsdom@26.1.0)
 
   packages/mcp-gcal:
     devDependencies:

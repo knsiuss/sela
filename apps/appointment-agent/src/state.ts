@@ -1,7 +1,7 @@
 import { Annotation } from "@langchain/langgraph";
 import type { RetainedInboundMessage } from "./agent_types.js";
 
-export type Intent = "confirm" | "cancel" | "reschedule" | "book" | "unknown";
+export type Intent = "confirm" | "cancel" | "reschedule" | "book" | "greet" | "unknown";
 
 export interface TimeSlot {
   id: string;

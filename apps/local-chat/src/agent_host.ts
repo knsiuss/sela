@@ -46,6 +46,8 @@ export interface StartLocalAgentInput {
   credentials: LocalCredentials;
   slots: readonly TimeSlot[];
   poll_interval_ms?: number;
+  /** Operator environment the model opt-in is read from. */
+  source_env?: Record<string, string | undefined>;
 }
 
 /**
@@ -60,6 +62,7 @@ export async function start_local_agent(input: StartLocalAgentInput): Promise<Lo
     agent_port: input.agent_port,
     credentials: input.credentials,
     slots: input.slots,
+    source_env: input.source_env ?? process.env,
     ...(input.poll_interval_ms === undefined ? {} : { poll_interval_ms: input.poll_interval_ms }),
   });
   // `build_runtime_sender` honours WHATSAPP_TRANSPORT=memory, so the sender

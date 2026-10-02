@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@langchain/core": "^0.3.0",
+    "@repo/llm": "workspace:*",
     "@repo/slot-broker": "workspace:*",
     "@repo/slot-engine": "workspace:*",
     "@repo/mcp-gcal": "workspace:*",

@@ -5,21 +5,29 @@ import { detect_handoff_reason, mask_phone_digits } from "./handoff.js";
 import type { CalendarPort } from "./tools/calendar.js";
 import { HOLD_TTL_SECONDS } from "./tools/hold_ttl.js";
 
-function parse_message(state: AppointmentStateType): Partial<AppointmentStateType> {
-  const { intent, confidence } = classify_intent(state.raw_message);
-  const gate = needs_human({ ...state, intent, confidence });
-  if (!gate.escalate) {
-    return { intent, confidence, needs_human: false, done: false };
-  }
-  // Mask before the summary reaches state: raw customer text may carry a
-  // phone number, and state is persisted in the LangGraph checkpointer.
-  const reason = detect_handoff_reason(state.raw_message) ?? gate.reason ?? "unknown";
-  return {
-    intent,
-    confidence,
-    needs_human: true,
-    human_summary: `Escalated: ${reason}. Message: ${mask_phone_digits(state.raw_message)}`,
-    done: true,
+/** Async classifier seam; the model-backed implementation lives in `intent/`. */
+export type IntentClassifier = (message: string) => Promise<{ intent: AppointmentStateType["intent"]; confidence: number }>;
+
+/** Classifier that runs the regex fast path only, matching pre-LLM behaviour. */
+const REGEX_ONLY_CLASSIFIER: IntentClassifier = async (message) => classify_intent(message);
+
+function parse_message(classifier: IntentClassifier) {
+  return async (state: AppointmentStateType): Promise<Partial<AppointmentStateType>> => {
+    const { intent, confidence } = await classifier(state.raw_message);
+    const gate = needs_human({ ...state, intent, confidence });
+    if (!gate.escalate) {
+      return { intent, confidence, needs_human: false, done: false };
+    }
+    // Mask before the summary reaches state: raw customer text may carry a
+    // phone number, and state is persisted in the LangGraph checkpointer.
+    const reason = detect_handoff_reason(state.raw_message) ?? gate.reason ?? "unknown";
+    return {
+      intent,
+      confidence,
+      needs_human: true,
+      human_summary: `Escalated: ${reason}. Message: ${mask_phone_digits(state.raw_message)}`,
+      done: true,
+    };
   };
 }
 
@@ -77,21 +85,32 @@ function write_calendar(calendar: CalendarPort) {
  *
  * Flow: parse -> offer -> hold -> confirm (HITL interrupt) -> write.
  * Low-confidence or sensitive conversations end after parse with a handoff summary.
+ * `greet` also ends after parse: a greeting needs an answer, not a slot
+ * catalogue, so it never reaches the offer node.
+ *
+ * @param calendar - Slot and mutation boundary for this tenant.
+ * @param classifier - Optional model-backed classifier; omit for regex only.
+ * @returns The compiled graph.
  */
-export function build_graph(calendar: CalendarPort) {
+export function build_graph(calendar: CalendarPort, classifier: IntentClassifier = REGEX_ONLY_CLASSIFIER) {
   const graph = new StateGraph(AppointmentState)
-    .addNode("parse", parse_message)
+    .addNode("parse", parse_message(classifier))
     .addNode("offer", offer_slots(calendar))
     .addNode("hold_slot", hold_chosen_slot(calendar))
     .addNode("confirm", confirm_write)
     .addNode("write", write_calendar(calendar))
     .addEdge(START, "parse")
     .addConditionalEdges("parse", (state) =>
-      state.needs_human || state.intent === "confirm" || state.intent === "cancel" ? END : "offer",
+      state.needs_human || is_terminal_intent(state.intent) ? END : "offer",
     )
     .addEdge("offer", "hold_slot")
     .addEdge("hold_slot", "confirm")
     .addEdge("confirm", "write")
     .addEdge("write", END);
   return graph.compile();
+}
+
+/** Intents answered from parse alone, with no calendar read. */
+function is_terminal_intent(intent: AppointmentStateType["intent"]): boolean {
+  return intent === "confirm" || intent === "cancel" || intent === "greet";
 }

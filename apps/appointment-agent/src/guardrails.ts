@@ -8,8 +8,18 @@ export interface ClassifiedIntent {
   confidence: number;
 }
 
+/** Greeting vocabulary that is unambiguous enough to answer without a model. */
+export const GREETING_PATTERN =
+  /^(hi|hai|hey|hello|halo|hola|hei|pagi|siang|sore|malam|assalamualaikum|salam|selamat (pagi|siang|sore|malam)|permisi|bro|dude)\b/;
+
 /**
  * Classify a raw customer message into a booking intent.
+ *
+ * This stays pure regex on purpose: it is the deterministic fast path, and it
+ * is the only producer of the `confirm` and `cancel` intents. Those two gate
+ * the customer-confirmation boundary, so no probabilistic classifier may
+ * produce them. Ambiguous input returns `unknown` and is escalated exactly as
+ * it was before the model fallback existed.
  *
  * Args:
  *   message: Raw customer message, any language mix.
@@ -27,6 +37,7 @@ export function classify_intent(message: string): ClassifiedIntent {
   if (/(booking|book|daftar|jadwal|appointment|mau periksa|mau potong)/.test(text)) {
     return { intent: "book", confidence: 0.75 };
   }
+  if (GREETING_PATTERN.test(text.trim())) return { intent: "greet", confidence: 0.85 };
   return { intent: "unknown", confidence: 0.3 };
 }
 

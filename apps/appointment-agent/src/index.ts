@@ -7,6 +7,7 @@ import { handle_voice_note } from "./voice_note_flow.js";
 import type { TimeSlot } from "./state.js";
 import { SlotServiceAdapter } from "./tools/slot_service_adapter.js";
 import { start_all, start_worker_only, stop_all } from "./composition.js";
+import { build_intent_classifier } from "./intent/classifier_factory.js";
 
 const DEFAULT_TENANT_ID = "default-tenant";
 const DEFAULT_CROSS_TENANT_VERTICAL = "clinic";
@@ -99,7 +100,7 @@ async function run_cli(
     return;
   }
 
-  const app = build_graph(calendar);
+  const app = build_graph(calendar, build_intent_classifier());
   const result = await app.invoke({
     conversation_id: `cli-${Date.now()}`,
     raw_message: message,

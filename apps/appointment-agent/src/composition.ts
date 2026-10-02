@@ -46,6 +46,10 @@ import {
 import type { CalendarPort } from "./tools/calendar.js";
 import type { TimeSlot } from "./state.js";
 import { build_graph } from "./graph.js";
+import {
+  build_intent_classifier,
+  describe_model_config,
+} from "./intent/classifier_factory.js";
 import { PostgresJobClaimer, type JobClaimer } from "./worker/job_claim.js";
 import {
   InMemoryJobLifecycleStore,
@@ -145,6 +149,8 @@ export interface AppComposition {
   sender_registry: OutboundSenderRegistry;
   /** Durable registry actually used by worker delivery. */
   durable_sender_registry: DurableOutboundSenderRegistry;
+  /** Active model description, or undefined when classification is regex-only. */
+  model_config?: { provider: string; model: string };
   /** Tenant admission scope; undefined only for an explicit multi-tenant registry. */
   worker_tenant_id?: string;
   server?: NodeHttpServer;
@@ -248,8 +254,10 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
     return calendar;
   });
   const loader: InboundLoader = new StoreInboundLoader(inbound_store);
+  const intent_classifier = build_intent_classifier({ env, metrics });
+  const model_config = describe_model_config(env);
   const graph_factory: GraphFactory = options.graph_factory ?? ((calendar: CalendarPort): GraphRunner => {
-    const graph = build_graph(calendar);
+    const graph = build_graph(calendar, intent_classifier);
     return { invoke: (state) => graph.invoke(state) };
   });
   const max_attempts = parse_positive_integer(env["WORKER_MAX_ATTEMPTS"] ?? "3", "WORKER_MAX_ATTEMPTS");
@@ -316,6 +324,7 @@ export function build_composition(options: CompositionOptions = {}): AppComposit
     metrics,
     sender_registry,
     durable_sender_registry,
+    ...(model_config === undefined ? {} : { model_config }),
     worker_tenant_id,
     start_server: async () => {
       if (server !== undefined) return;
