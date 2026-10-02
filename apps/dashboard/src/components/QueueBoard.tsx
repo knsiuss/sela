@@ -16,10 +16,10 @@ import {
   MAX_ESCALATION_LEVEL,
   queue_status_label,
   type QueueActionKey,
-  type QueueItemStatus,
 } from "@/domain/operator_queue_board";
-import { StatusBadge, type BadgeTone } from "./StatusBadge";
+import { StatusBadge } from "./StatusBadge";
 import { SlaTimer } from "./SlaTimer";
+import { status_tone } from "./status_tone";
 import { use_workspace } from "./WorkspaceProvider";
 
 /** Props for {@link QueueBoard}. */
@@ -32,10 +32,6 @@ type QueueRow = ReturnType<typeof build_queue_rows>[number];
 
 const ACTION_LABELS: Readonly<Record<QueueActionKey, string>> = {
   assign: "Assign", escalate: "Escalate", resolve: "Resolve",
-};
-
-const STATUS_TONES: Readonly<Record<QueueItemStatus, BadgeTone>> = {
-  unassigned: "warning", assigned: "neutral", escalated: "critical", resolved: "positive",
 };
 
 const ALL_ACTIONS: readonly QueueActionKey[] = ["assign", "escalate", "resolve"];
@@ -90,7 +86,7 @@ function QueueCard(props: QueueCardProps): ReactElement {
   }
 
   return (
-    <li className="card">
+    <li className="card" data-card-status={item.status}>
       <div role="group" aria-labelledby={heading_id} className="card__group">
         <h3 id={heading_id}>{item.item_id}</h3>
         <QueueFacts row={props.row} now_ms={props.now_ms} />
@@ -119,7 +115,7 @@ function QueueFacts(props: QueueFactsProps): ReactElement {
     <dl className="card__facts">
       <div key="status">
         <dt>Status</dt>
-        <dd><StatusBadge label={queue_status_label(item.status)} tone={STATUS_TONES[item.status]} status={item.status} /></dd>
+        <dd><StatusBadge label={queue_status_label(item.status)} tone={status_tone(item.status)} status={item.status} /></dd>
       </div>
       <div key="assignee"><dt>Assignee</dt><dd>{item.assignee_subject ?? "Unassigned"}</dd></div>
       <div key="escalation">

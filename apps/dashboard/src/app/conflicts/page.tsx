@@ -1,5 +1,6 @@
 import type { ReactElement } from "react";
 import { ConflictBoard } from "@/components/ConflictBoard";
+import { PageHeader } from "@/components/PageHeader";
 import { load_local_scope } from "../local_scope";
 
 /**
@@ -11,11 +12,11 @@ export default function ConflictsPage(): ReactElement {
   const { snapshot } = load_local_scope();
   return (
     <>
-      <h1>Conflicts</h1>
-      <p>
-        Lifecycle: pending, proposed, then one terminal state of accepted, rejected, or expired.
-        Accepting a resolution requires MFA claims, and a stale generation is rejected by the domain.
-      </p>
+      <PageHeader
+        eyebrow="Workspace"
+        title="Conflicts"
+        description={<>Lifecycle: pending, proposed, then one terminal state of accepted, rejected, or expired. Accepting a resolution requires MFA claims, and a stale generation is rejected by the domain. All timestamps are UTC.</>}
+      />
       <ConflictBoard tenant_id={snapshot.tenant_id} />
     </>
   );

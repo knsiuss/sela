@@ -1,0 +1,150 @@
+/*
+ * Element defaults and accessibility primitives.
+ *
+ * Nothing here is a component style: this layer only resets browser defaults and
+ * owns the two primitives every component depends on — the visible focus ring
+ * and the visually-hidden utility. Keeping them here means a new surface cannot
+ * accidentally ship without them.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/*
+ * `body` is the app-shell grid. The shell renders exactly `<header>` and
+ * `<main>` as top-level elements (a test asserts no element sits outside a
+ * landmark), so the two-column layout has to come from the body rather than a
+ * wrapper element.
+ */
+body {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  align-items: start;
+  min-height: 100dvh;
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  color: var(--color-text);
+  line-height: var(--leading-tight);
+  letter-spacing: -0.01em;
+}
+
+h1 {
+  font-size: var(--text-2xl);
+  font-weight: 650;
+}
+
+h2 {
+  font-size: var(--text-lg);
+  font-weight: 620;
+}
+
+h3 {
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+p {
+  margin: 0;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+}
+
+a {
+  color: var(--color-accent);
+  text-decoration-color: light-dark(color-mix(in srgb, var(--color-accent) 40%, transparent), color-mix(in srgb, var(--color-accent) 55%, transparent));
+  text-underline-offset: 0.15em;
+}
+
+a:hover {
+  color: var(--color-accent-hover);
+}
+
+code,
+kbd,
+samp {
+  font-family: var(--font-mono);
+  font-size: 0.925em;
+}
+
+/*
+ * The ring is drawn outside the control fill and paired with a soft halo, so it
+ * stays visible on a surface, on a card, and on a filled accent button alike.
+ */
+:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 26%, transparent);
+}
+
+/* Available to assistive technology, invisible on screen. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/*
+ * First focusable element on every page. It parks above the viewport until
+ * focused; the shell header is positioned, so this offsets from it and is
+ * clipped rather than left hanging over the content.
+ */
+.skip-link {
+  position: absolute;
+  left: var(--space-sm);
+  top: -3rem;
+  z-index: var(--z-skip-link);
+  padding: var(--space-xs) var(--space-sm);
+  border: 2px solid var(--color-focus);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.skip-link:focus {
+  top: var(--space-sm);
+}
+
+/*
+ * Motion is decoration. Honour the OS preference rather than animating anyway.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

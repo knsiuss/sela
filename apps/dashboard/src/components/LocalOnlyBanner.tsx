@@ -4,6 +4,9 @@
  * SECURITY (P2.2): this build has no authentication. The wording is
  * deliberate and must not be softened while auth is outstanding, because the
  * operator is the only thing keeping tenant scope honest right now.
+ *
+ * It stays inside the `banner` landmark, which a test asserts, so it lives in
+ * the shell header rather than above the shell.
  */
 
 import type { ReactElement } from "react";

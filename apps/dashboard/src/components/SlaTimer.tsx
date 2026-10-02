@@ -11,7 +11,9 @@
 
 import { useEffect, useState, type ReactElement } from "react";
 import { sla_state_label, sla_view, type QueueItem } from "@/domain/operator_queue_board";
-import { StatusBadge, type BadgeTone } from "./StatusBadge";
+import { format_datetime } from "./format_datetime";
+import { StatusBadge } from "./StatusBadge";
+import { status_tone } from "./status_tone";
 
 /** How often the countdown text refreshes. */
 const TICK_MS = 30_000;
@@ -41,15 +43,11 @@ export function SlaTimer(props: SlaTimerProps): ReactElement {
   const sla = sla_view(props.item, new Date(now_ms));
   return (
     <span className="sla">
-      <StatusBadge label={sla_state_label(sla.state)} tone={SLA_TONES[sla.state]} status={sla.state} />
-      <time dateTime={sla.due_at_iso}>{sla.due_at_iso}</time>
+      <StatusBadge label={sla_state_label(sla.state)} tone={status_tone(sla.state)} status={sla.state} />
+      <time dateTime={sla.due_at_iso}>{format_datetime(sla.due_at_iso)}</time>
       <span className="sla__remaining">
         {props.item.status === "resolved" ? "closed" : `${sla.minutes_remaining} min remaining`}
       </span>
     </span>
   );
 }
-
-const SLA_TONES: Readonly<Record<string, BadgeTone>> = {
-  on_track: "positive", due_soon: "warning", breached: "critical", met: "neutral",
-};

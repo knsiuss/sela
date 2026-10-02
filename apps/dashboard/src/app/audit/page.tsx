@@ -1,5 +1,6 @@
 import type { ReactElement } from "react";
 import { AuditTimeline } from "@/components/AuditTimeline";
+import { PageHeader } from "@/components/PageHeader";
 import { load_local_scope } from "../local_scope";
 
 /**
@@ -11,11 +12,11 @@ export default function AuditPage(): ReactElement {
   const { snapshot } = load_local_scope();
   return (
     <>
-      <h1>Audit</h1>
-      <p>
-        Tenant-scoped to <strong>{snapshot.tenant_id}</strong>. Entries carry operator, action, target,
-        outcome, reason code, and request id only.
-      </p>
+      <PageHeader
+        eyebrow="Workspace"
+        title="Audit"
+        description={<>Tenant-scoped to <strong>{snapshot.tenant_id}</strong>. Entries carry operator, action, target, outcome, reason code, and request id only. All timestamps are UTC.</>}
+      />
       <AuditTimeline />
     </>
   );

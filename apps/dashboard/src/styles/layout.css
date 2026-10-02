@@ -1,0 +1,229 @@
+/*
+ * App shell layout: sidebar, primary navigation, and the page-header pattern.
+ *
+ * The shell renders `<header>` (sidebar) and `<main>` (content) as the only two
+ * top-level elements, because a test asserts that nothing is rendered outside a
+ * landmark. All two-column behaviour therefore comes from the `body` grid
+ * declared in `base.css`.
+ *
+ * Breakpoints:
+ * - <= 1180px  the sidebar narrows to its compact width.
+ * - <= 900px   the sidebar becomes a sticky top bar and the nav wraps.
+ * - <= 640px   content gutters and the nav tighten for phone widths.
+ */
+
+/* --- Sidebar ------------------------------------------------------------- */
+
+.shell-header {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  height: 100dvh;
+  padding: var(--space-lg) var(--space-md);
+  overflow-y: auto;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.shell-brand {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+.shell-brand__name {
+  font-size: var(--text-md);
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+
+.shell-brand__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2xs);
+}
+
+/* Text chip, not a badge: it labels the build, it does not encode a state. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-xs);
+  border: 1px solid var(--color-border-control);
+  border-radius: var(--radius-pill);
+  color: var(--color-text-muted);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* --- Primary navigation -------------------------------------------------- */
+
+.site-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.site-nav__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.site-nav__link {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  font-weight: 550;
+  text-decoration: none;
+  transition: background-color var(--duration-fast) var(--easing-standard), color var(--duration-fast) var(--easing-standard);
+}
+
+.site-nav__link:hover {
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+}
+
+/*
+ * Active route: accent tint plus a solid left bar. The bar is a shape, not just
+ * a colour change, so the current page is still obvious in greyscale.
+ */
+.site-nav__link[aria-current="page"] {
+  background: var(--color-accent-subtle);
+  color: var(--color-accent);
+  font-weight: 650;
+}
+
+.site-nav__link[aria-current="page"]::before {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 3px;
+  height: 1.25rem;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent);
+  content: "";
+  transform: translateY(-50%);
+}
+
+.site-nav__footer {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding-top: var(--space-md);
+}
+
+/* --- Content column ------------------------------------------------------ */
+
+.shell-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  width: 100%;
+  max-width: var(--content-max);
+  min-width: 0;
+  padding: var(--space-xl) var(--space-2xl) var(--space-3xl);
+}
+
+/* --- Page header --------------------------------------------------------- */
+
+.page-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding-bottom: var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.page-header__eyebrow {
+  color: var(--color-text-subtle);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.page-header__description {
+  max-width: 60ch;
+  color: var(--color-text-muted);
+}
+
+/* --- Responsive ---------------------------------------------------------- */
+
+@media (max-width: 1180px) {
+  body {
+    --sidebar-width: 14rem;
+  }
+}
+
+@media (max-width: 900px) {
+  /* Sidebar becomes a sticky top bar; the nav wraps instead of scrolling. */
+  body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .shell-header {
+    position: sticky;
+    z-index: 4;
+    height: auto;
+    padding: var(--space-md);
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .site-nav__list {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: var(--space-2xs);
+  }
+
+  .site-nav__link {
+    padding: var(--space-2xs) var(--space-xs);
+  }
+
+  .site-nav__link[aria-current="page"]::before {
+    inset: auto auto 0 0;
+    width: 100%;
+    height: 2px;
+    transform: none;
+  }
+
+  .site-nav__footer {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+    padding-top: var(--space-sm);
+    border-top: 1px solid var(--color-border);
+  }
+
+  .shell-main {
+    padding: var(--space-lg) var(--space-lg) var(--space-2xl);
+  }
+}
+
+@media (max-width: 640px) {
+  .shell-main {
+    gap: var(--space-md);
+    padding: var(--space-md) var(--space-md) var(--space-xl);
+  }
+
+  h1 {
+    font-size: var(--text-xl);
+  }
+}

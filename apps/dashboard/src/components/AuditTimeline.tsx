@@ -15,12 +15,10 @@ import {
   count_new_entries,
   type AuditEntry,
 } from "@/domain/audit_timeline";
-import { StatusBadge, type BadgeTone } from "./StatusBadge";
+import { format_datetime } from "./format_datetime";
+import { StatusBadge } from "./StatusBadge";
+import { status_tone } from "./status_tone";
 import { use_workspace } from "./WorkspaceProvider";
-
-const OUTCOME_TONES: Readonly<Record<string, BadgeTone>> = {
-  succeeded: "positive", denied: "critical", failed: "warning",
-};
 
 /**
  * Render the append-only, redacted audit timeline.
@@ -54,7 +52,7 @@ export function AuditTimeline(): ReactElement {
         reasons are never stored locally and never rendered.
       </p>
       {entries.length === 0
-        ? <p>No operator actions have been attempted in this session.</p>
+        ? <p className="empty-state">No operator actions have been attempted in this session.</p>
         : <ol className="timeline">{entries.map((entry) => <AuditItem key={entry.entry_id} entry={entry} />)}</ol>}
     </section>
   );
@@ -68,18 +66,20 @@ function AuditItem(props: AuditItemProps): ReactElement {
   const entry = props.entry;
   return (
     <li className="timeline__item">
-      <time dateTime={entry.at_iso}>{entry.at_iso}</time>
+      <div className="panel__header">
+        <time dateTime={entry.at_iso}>{format_datetime(entry.at_iso)}</time>
+        <StatusBadge
+          label={audit_outcome_label(entry.outcome)}
+          tone={status_tone(entry.outcome)}
+          status={entry.outcome}
+        />
+      </div>
       <span className="timeline__action">{entry.action}</span>
-      <StatusBadge
-        label={audit_outcome_label(entry.outcome)}
-        tone={OUTCOME_TONES[entry.outcome] ?? "neutral"}
-        status={entry.outcome}
-      />
       <dl className="card__facts">
         <div key="actor"><dt>Actor</dt><dd>{entry.actor_subject}</dd></div>
-        <div key="target"><dt>Target</dt><dd>{entry.target_id}</dd></div>
-        <div key="reason_code"><dt>Reason code</dt><dd>{entry.reason_code ?? "none"}</dd></div>
-        <div key="request"><dt>Request</dt><dd>{entry.request_id}</dd></div>
+        <div key="target"><dt>Target</dt><dd className="cell--identifier">{entry.target_id}</dd></div>
+        <div key="reason_code"><dt>Reason code</dt><dd className="cell--identifier">{entry.reason_code ?? "none"}</dd></div>
+        <div key="request"><dt>Request</dt><dd className="cell--identifier">{entry.request_id}</dd></div>
       </dl>
     </li>
   );

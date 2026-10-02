@@ -1,5 +1,6 @@
 import type { ReactElement } from "react";
 import { AppointmentTable } from "@/components/AppointmentTable";
+import { PageHeader } from "@/components/PageHeader";
 import { load_local_scope } from "../local_scope";
 
 /**
@@ -11,11 +12,11 @@ export default function AppointmentsPage(): ReactElement {
   const { snapshot } = load_local_scope();
   return (
     <>
-      <h1>Appointments</h1>
-      <p>
-        Tenant-scoped list. Sorting and filtering happen over identifiers only; no customer name,
-        phone number, or message content is stored or rendered in this workspace.
-      </p>
+      <PageHeader
+        eyebrow="Workspace"
+        title="Appointments"
+        description={<>Tenant-scoped list. Sorting and filtering happen over identifiers only; no customer name, phone number, or message content is stored or rendered in this workspace. All timestamps are UTC.</>}
+      />
       <AppointmentTable rows={snapshot.appointments} tenant_id={snapshot.tenant_id} />
     </>
   );

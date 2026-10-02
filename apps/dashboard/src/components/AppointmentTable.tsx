@@ -7,6 +7,11 @@
  * and `aria-sort` on the active column. Every sort control is a real `<button>`
  * inside the header cell so it is reachable and operable by keyboard, and the
  * result count is announced through a polite live region.
+ *
+ * The sort direction is drawn as an arrow glyph as well as exposed through
+ * `aria-sort`, so the active column is identifiable without colour. The glyph
+ * is `aria-hidden` on purpose: the header's accessible name stays exactly the
+ * column label, which the view and keyboard tests match on.
  */
 
 import { useId, useMemo, useState, type ReactElement } from "react";
@@ -23,7 +28,9 @@ import {
   type AppointmentSortKey,
   type SortDirection,
 } from "@/domain/appointments_view";
-import { StatusBadge, type BadgeTone } from "./StatusBadge";
+import { format_datetime } from "./format_datetime";
+import { StatusBadge } from "./StatusBadge";
+import { status_tone } from "./status_tone";
 
 /** Props for {@link AppointmentTable}. */
 export interface AppointmentTableProps {
@@ -36,9 +43,10 @@ const COLUMN_LABELS: Readonly<Record<AppointmentSortKey, string>> = {
   starts_at_iso: "Starts at", ends_at_iso: "Ends at", status: "Status",
 };
 
-const STATUS_TONES: Readonly<Record<string, BadgeTone>> = {
-  confirmed: "positive", held: "warning", cancelled: "neutral", completed: "neutral", no_show: "critical",
-};
+/** Columns whose values are compared as numbers or times, so they align right. */
+const NUMERIC_COLUMNS: ReadonlySet<AppointmentSortKey> = new Set([
+  "version", "starts_at_iso", "ends_at_iso",
+]);
 
 /** Sort and filter state the table owns. */
 interface ListControls {
@@ -88,7 +96,10 @@ export function AppointmentTable(props: AppointmentTableProps): ReactElement {
       <p className="result-count" role="status">
         {visible.length} of {props.rows.length} appointments shown for tenant {props.tenant_id}.
       </p>
-      <AppointmentTableBody rows={visible} controls={controls} on_sort={on_sort} />
+      <p className="table-hint">Scroll the table sideways to reach every column.</p>
+      <div className="table-scroll" role="region" aria-label="Appointments table" tabIndex={0}>
+        <AppointmentTableBody rows={visible} controls={controls} on_sort={on_sort} />
+      </div>
     </section>
   );
 }
@@ -146,7 +157,7 @@ function AppointmentTableBody(props: AppointmentTableBodyProps): ReactElement {
       <tbody>
         {props.rows.map((row) => <AppointmentRowCells key={row.appointment_id} row={row} />)}
         {props.rows.length === 0 && (
-          <tr><td colSpan={APPOINTMENT_SORT_KEYS.length}>No appointments match the current filters.</td></tr>
+          <tr><td className="empty-state" colSpan={APPOINTMENT_SORT_KEYS.length}>No appointments match the current filters.</td></tr>
         )}
       </tbody>
     </table>
@@ -160,10 +171,16 @@ interface SortableHeaderProps {
 }
 
 function SortableHeader(props: SortableHeaderProps): ReactElement {
+  const class_name = NUMERIC_COLUMNS.has(props.column) ? "cell--numeric" : undefined;
   return (
-    <th scope="col" aria-sort={aria_sort_for(props.column, props.controls.sort_key, props.controls.direction)}>
+    <th
+      scope="col"
+      className={class_name}
+      aria-sort={aria_sort_for(props.column, props.controls.sort_key, props.controls.direction)}
+    >
       <button type="button" onClick={() => props.on_sort(props.column)}>
         {COLUMN_LABELS[props.column]}
+        <span className="sort-mark" aria-hidden="true" />
       </button>
     </th>
   );
@@ -177,12 +194,14 @@ function AppointmentRowCells(props: AppointmentRowCellsProps): ReactElement {
   const row = props.row;
   return (
     <tr>
-      <td>{row.appointment_id}</td>
-      <td>{row.resource_id}</td>
-      <td>{row.version}</td>
-      <td><time dateTime={row.starts_at_iso}>{row.starts_at_iso}</time></td>
-      <td><time dateTime={row.ends_at_iso}>{row.ends_at_iso}</time></td>
-      <td><StatusBadge label={row.status} tone={STATUS_TONES[row.status] ?? "neutral"} status={row.status} /></td>
+      <td className="cell--identifier">{row.appointment_id}</td>
+      <td className="cell--identifier">{row.resource_id}</td>
+      <td className="cell--numeric">{row.version}</td>
+      <td className="cell--numeric"><time dateTime={row.starts_at_iso}>{format_datetime(row.starts_at_iso)}</time></td>
+      <td className="cell--numeric"><time dateTime={row.ends_at_iso}>{format_datetime(row.ends_at_iso)}</time></td>
+      <td>
+        <StatusBadge label={row.status} tone={status_tone(row.status)} status={row.status} />
+      </td>
     </tr>
   );
 }

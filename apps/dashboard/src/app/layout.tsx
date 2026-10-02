@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import type { ReactElement, ReactNode } from "react";
 import "./globals.css";
 import { AppShell } from "@/components/AppShell";
@@ -9,6 +9,22 @@ const METADATA: Metadata = {
   description: "Local, unauthenticated operator workspace for the appointment agent.",
   robots: { index: false, follow: false },
 };
+
+/*
+ * Declares that both colour schemes are supported before the stylesheet loads,
+ * so the browser paints the correct canvas colour rather than flashing white.
+ * The token layer resolves every colour from this, and the in-app toggle can
+ * override it per operator.
+ */
+const viewport: Viewport = {
+  colorScheme: "light dark",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f4f6f8" },
+    { media: "(prefers-color-scheme: dark)", color: "#0b0e14" },
+  ],
+};
+
+export { viewport };
 
 /** Props for the root layout; Next supplies them. */
 export interface RootLayoutProps {

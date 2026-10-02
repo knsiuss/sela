@@ -17,9 +17,10 @@ import {
   conflict_status_label,
   type ConflictActionKey,
   type ConflictRecord,
-  type ConflictStatus,
 } from "@/domain/conflict_board";
-import { StatusBadge, type BadgeTone } from "./StatusBadge";
+import { format_datetime } from "./format_datetime";
+import { StatusBadge } from "./StatusBadge";
+import { status_tone } from "./status_tone";
 import { use_workspace } from "./WorkspaceProvider";
 
 /** Props for {@link ConflictBoard}. */
@@ -29,10 +30,6 @@ export interface ConflictBoardProps {
 
 const ACTION_LABELS: Readonly<Record<ConflictActionKey, string>> = {
   propose: "Propose resolution", accept: "Accept resolution", reject: "Reject",
-};
-
-const STATUS_TONES: Readonly<Record<ConflictStatus, BadgeTone>> = {
-  pending: "warning", proposed: "warning", accepted: "positive", rejected: "critical", expired: "neutral",
 };
 
 const ALL_ACTIONS: readonly ConflictActionKey[] = ["propose", "accept", "reject"];
@@ -59,9 +56,13 @@ export function ConflictBoard(props: ConflictBoardProps): ReactElement {
       <p className="result-count" role="status" tabIndex={-1} ref={status_ref}>
         {open_count} of {conflicts.length} conflicts await a decision.
       </p>
-      <ul className="card-list">
-        {conflicts.map((record) => <ConflictCard key={record.conflict_id} record={record} tenant_id={props.tenant_id} />)}
-      </ul>
+      {conflicts.length === 0
+        ? <p className="empty-state">No conflicts are recorded for this tenant.</p>
+        : (
+          <ul className="card-list">
+            {conflicts.map((record) => <ConflictCard key={record.conflict_id} record={record} tenant_id={props.tenant_id} />)}
+          </ul>
+        )}
     </section>
   );
 }
@@ -85,7 +86,7 @@ function ConflictCard(props: ConflictCardProps): ReactElement {
   }
 
   return (
-    <li className="card">
+    <li className="card" data-card-status={props.record.status}>
       <div role="group" aria-labelledby={heading_id} className="card__group">
         <h3 id={heading_id}>{props.record.conflict_id}</h3>
         <ConflictFacts record={props.record} />
@@ -112,22 +113,25 @@ function ConflictFacts(props: ConflictFactsProps): ReactElement {
   const record = props.record;
   return (
     <dl className="card__facts">
-      <div key="appointment"><dt>Appointment</dt><dd>{record.appointment_id}</dd></div>
+      <div key="appointment"><dt>Appointment</dt><dd className="cell--identifier">{record.appointment_id}</dd></div>
       <div key="status">
         <dt>Status</dt>
         <dd>
           <StatusBadge
             label={conflict_status_label(record.status)}
-            tone={STATUS_TONES[record.status]}
+            tone={status_tone(record.status)}
             status={record.status}
           />
         </dd>
       </div>
       <div key="generation"><dt>Generation</dt><dd>{record.generation}</dd></div>
-      <div key="proposed_slot"><dt>Proposed slot</dt><dd>{record.proposed_slot_iso ?? "None yet"}</dd></div>
+      <div key="proposed_slot">
+        <dt>Proposed slot</dt>
+        <dd>{record.proposed_slot_iso === null ? "None yet" : format_datetime(record.proposed_slot_iso)}</dd>
+      </div>
       <div key="expires_at">
         <dt>Expires at</dt>
-        <dd><time dateTime={record.expires_at_iso}>{record.expires_at_iso}</time></dd>
+        <dd><time dateTime={record.expires_at_iso}>{format_datetime(record.expires_at_iso)}</time></dd>
       </div>
     </dl>
   );
@@ -215,6 +219,12 @@ function disabled_reason(record: ConflictRecord, actions: readonly ConflictActio
   return "No actions available. The current role cannot reschedule appointments for this tenant.";
 }
 
+/**
+ * Seed the slot input from the record.
+ *
+ * The input keeps the machine `datetime-local` value; only the read-only
+ * summaries elsewhere are formatted for a human.
+ */
 function default_slot(record: ConflictRecord): string {
   const base = record.proposed_slot_iso ?? record.expires_at_iso;
   return base.slice(0, 16);

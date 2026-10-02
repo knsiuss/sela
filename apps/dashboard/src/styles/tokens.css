@@ -1,0 +1,116 @@
+/*
+ * Design tokens for the operator dashboard.
+ *
+ * Every colour is declared once through `light-dark()`, which resolves against
+ * the used `color-scheme`. That keeps light and dark as a single source of
+ * truth: a token can never drift out of sync between the two themes, and a
+ * `:root[data-theme]` override only has to restate the scheme, not the palette.
+ *
+ * `test/design_tokens.test.ts` parses this file and asserts the contrast of each
+ * pair declared below in BOTH themes, so the palette is evidence-backed rather
+ * than eyeballed. Changing a hex without re-checking it fails the suite.
+ *
+ * Boundaries:
+ * - `--color-border` is a decorative divider only. Anything an operator must
+ *   perceive as a control boundary (inputs, selects, focusable outlines) uses
+ *   `--color-border-control`, which clears the 3:1 non-text gate.
+ * - Focus rings are drawn OUTSIDE the control fill, so they are measured
+ *   against the page surface rather than against `--color-accent`.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* Neutrals: canvas sits behind cards, surface is the card itself. */
+  --color-canvas: light-dark(#f4f6f8, #0b0e14);
+  --color-surface: light-dark(#ffffff, #141922);
+  --color-surface-raised: light-dark(#ffffff, #1b2230);
+  --color-surface-muted: light-dark(#f1f3f7, #1b2230);
+  --color-border: light-dark(#d7dce4, #2a3341);
+  --color-border-control: light-dark(#7f8898, #6b7684);
+  --color-text: light-dark(#11151c, #e7ecf3);
+  --color-text-muted: light-dark(#4a5261, #a3adbd);
+  --color-text-subtle: light-dark(#5b6472, #8b96a6);
+
+  /* Brand and interactive surfaces. */
+  --color-accent: light-dark(#2f5fd0, #6f9bff);
+  --color-accent-hover: light-dark(#24499f, #8db0ff);
+  --color-accent-contrast: light-dark(#ffffff, #0b0e14);
+  --color-accent-subtle: light-dark(#e8eefb, #17203a);
+  --color-focus: light-dark(#0b57d0, #8ab4ff);
+
+  /*
+   * Semantic state colours. Each state is a foreground/background/border set so
+   * a pill can be tinted without a second lookup, and the foreground is the
+   * value that carries text.
+   */
+  --state-positive-fg: light-dark(#0f6b3a, #6ee7a8);
+  --state-positive-bg: light-dark(#e3f5e9, #10281c);
+  --state-positive-border: light-dark(#a8dcbd, #1e4a33);
+  --state-warning-fg: light-dark(#8a5300, #fbbf4a);
+  --state-warning-bg: light-dark(#fdf1dc, #2b2110);
+  --state-warning-border: light-dark(#f0cf94, #57411a);
+  --state-critical-fg: light-dark(#a01626, #ff9aa5);
+  --state-critical-bg: light-dark(#fdeaec, #2f1418);
+  --state-critical-border: light-dark(#f2b3ba, #5b232c);
+  --state-neutral-fg: light-dark(#3f4757, #aab4c4);
+  --state-neutral-bg: light-dark(#eceff4, #1c222d);
+  --state-neutral-border: light-dark(#cbd2dd, #333d4c);
+
+  /* Spacing scale on a 4px rhythm. */
+  --space-3xs: 0.125rem;
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2rem;
+  --space-2xl: 3rem;
+  --space-3xl: 4rem;
+
+  /* Type scale. The workspace is dense, so the base step stays small. */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --text-2xs: 0.6875rem;
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-md: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+  --leading-tight: 1.25;
+  --leading-normal: 1.55;
+
+  /* Radii and elevation. */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+  --shadow-card: 0 1px 2px light-dark(rgb(16 21 28 / 6%), rgb(0 0 0 / 40%));
+  --shadow-raised: 0 4px 14px light-dark(rgb(16 21 28 / 8%), rgb(0 0 0 / 55%));
+
+  /* Layout metrics. */
+  --sidebar-width: 16.5rem;
+  --content-max: 82rem;
+
+  /* Motion. Durations collapse under prefers-reduced-motion. */
+  --duration-fast: 120ms;
+  --easing-standard: cubic-bezier(0.2, 0, 0.2, 1);
+
+  /* Stacking order for the sticky table header and the skip link. */
+  --z-sticky-header: 2;
+  --z-skip-link: 10;
+}
+
+/*
+ * Manual theme override. Only the scheme is restated: `light-dark()` picks the
+ * matching palette, so there is exactly one copy of each colour value.
+ */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}

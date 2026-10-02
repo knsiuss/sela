@@ -108,7 +108,7 @@ function ActionSelectors(props: ActionSelectorsProps): ReactElement {
   const action_id = useId();
   const target_id = useId();
   return (
-    <>
+    <div className="filters">
       <div className="field">
         <label htmlFor={action_id}>Action</label>
         <select
@@ -142,7 +142,7 @@ function ActionSelectors(props: ActionSelectorsProps): ReactElement {
           {OPERATOR_ACTION_REASON_CODES.map((value) => <option key={value} value={value}>{value}</option>)}
         </select>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -157,6 +157,7 @@ function SubmitButton(props: SubmitButtonProps): ReactElement {
   return (
     <button
       type="button"
+      className="button--primary"
       onClick={props.on_submit}
       disabled={props.blocked_code !== null || props.is_pending}
       aria-describedby={props.blocked_code === null ? undefined : props.hint_id}
