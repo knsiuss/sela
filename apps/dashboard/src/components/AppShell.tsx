@@ -19,9 +19,9 @@
  */
 
 import type { ReactElement, ReactNode } from "react";
+import { LocalOnlyBanner } from "@repo/ui";
 import type { WorkspaceSnapshot } from "@/domain/workspace_state";
 import type { LocalPrincipalClaims } from "@/domain/synthetic_principal";
-import { LocalOnlyBanner } from "./LocalOnlyBanner";
 import { SiteNav } from "./SiteNav";
 import { ThemeToggle } from "./ThemeToggle";
 import { WorkspaceProvider } from "./WorkspaceProvider";

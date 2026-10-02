@@ -3,5 +3,28 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Reserved boundary for the recovered-revenue dashboard. No exports until the dashboard is implemented; the previous manifest pointed main/types at a src/ directory that did not exist."
+  "description": "Shared React surfaces used by more than one local app. The local-only environment notice lives here so the operator dashboard and the local end-user chat client cannot drift into two different security framings.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "react": "19.3.0",
+    "typescript": "^5.5.0"
+  }
 }

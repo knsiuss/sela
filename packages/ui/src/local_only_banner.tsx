@@ -1,12 +1,17 @@
 /**
- * Standing local-only warning shown above every workspace view.
+ * Standing local-only warning shown by every local surface in this repository.
  *
  * SECURITY (P2.2): this build has no authentication. The wording is
  * deliberate and must not be softened while auth is outstanding, because the
  * operator is the only thing keeping tenant scope honest right now.
  *
- * It stays inside the `banner` landmark, which a test asserts, so it lives in
- * the shell header rather than above the shell.
+ * It lives in `@repo/ui` rather than in one app because two unauthenticated
+ * local surfaces now render it: the operator dashboard and the end-user chat
+ * client. A second copy of this copy would let the two framings drift, and a
+ * softened variant is exactly the failure this component exists to prevent.
+ * The class names are part of the contract with each surface's stylesheet and
+ * with the dashboard's landmark and styling-coverage tests, so they are
+ * reproduced verbatim rather than renamed to a shared token.
  */
 
 import type { ReactElement } from "react";

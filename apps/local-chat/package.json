@@ -1,0 +1,28 @@
+{
+  "name": "@repo/local-chat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only, loopback-only end-user chat client for the local appointment agent. Hosts the real in-memory agent composition and signs genuine Meta webhook payloads so a human can converse with the real agent without a Meta account.",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@repo/ui": "workspace:*",
+    "appointment-agent": "workspace:*",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.0"
+  }
+}

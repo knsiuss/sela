@@ -66,6 +66,9 @@ importers:
 
   apps/dashboard:
     dependencies:
+      '@repo/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
       appointment-agent:
         specifier: workspace:*
         version: link:../appointment-agent
@@ -103,6 +106,40 @@ importers:
       jsdom:
         specifier: ^26.1.0
         version: 26.1.0
+      typescript:
+        specifier: ^5.5.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@26.6.2)(jsdom@26.1.0)
+
+  apps/local-chat:
+    dependencies:
+      '@repo/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
+      appointment-agent:
+        specifier: workspace:*
+        version: link:../appointment-agent
+      react:
+        specifier: 19.3.0
+        version: 19.3.0
+      react-dom:
+        specifier: 19.3.0
+        version: 19.3.0(react@19.3.0)
+    devDependencies:
+      '@types/node':
+        specifier: ^26.6.2
+        version: 26.6.2
+      '@types/react':
+        specifier: ^19.2.0
+        version: 19.3.0
+      '@types/react-dom':
+        specifier: ^19.2.0
+        version: 19.3.0(@types/react@19.3.0)
+      tsx:
+        specifier: ^4.16.0
+        version: 4.23.15
       typescript:
         specifier: ^5.5.0
         version: 5.9.3
@@ -182,7 +219,17 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@26.6.2)(jsdom@26.1.0)
 
-  packages/ui: {}
+  packages/ui:
+    devDependencies:
+      '@types/react':
+        specifier: ^19.2.0
+        version: 19.3.0
+      react:
+        specifier: 19.3.0
+        version: 19.3.0
+      typescript:
+        specifier: ^5.5.0
+        version: 5.9.3
 
   packages/voice-intent:
     devDependencies:
