@@ -327,14 +327,42 @@ Provider source of truth:
 - [x] Define handoff queue and tenant-safe operator action boundary.
 - [x] Add redacted operator context and PII-minimized audit timeline.
 - [x] Add authorized reschedule/cancel/replay action contracts.
-- [ ] Build conflict resolution UI/state.
-- [ ] Add assignment and escalation workflow.
-- [ ] Add SLA timers.
+- [x] Build conflict resolution UI/state.
+- [x] Add assignment and escalation workflow.
+- [x] Add SLA timers.
 - [x] Add manual replay authorization/audit contract; provider adapter remains open.
 - [x] Add role-based access checks to every operator mutation.
-- [ ] Add accessibility and keyboard/screen-reader coverage for the UI.
+- [x] Add accessibility and keyboard/screen-reader coverage for the UI.
 
 **Done evidence:** Operator design, permission tests, accessibility audit, and support workflow.
+
+The UI half of P2.2 landed in `apps/dashboard` as a Next.js App Router application. It drives the
+already-audited domain contracts rather than a parallel model: conflict transitions call
+`conflict_resolution.ts`, the queue calls `operator_queue.ts` (including the escalation cap and SLA
+breach rule), operator actions call `operator_actions.ts` behind the real authorization preflight, and
+every principal is validated by `authorization.ts`. The action surface mirrors the existing
+`POST /v1/operator/actions` request shape but is served by a clearly marked local in-memory fixture and
+audit adapter; there is no HTTP or database wiring yet.
+
+Verified evidence: `pnpm typecheck` and `pnpm test` green monorepo-wide (dashboard 193 tests across 13
+files; appointment-agent 613 tests unchanged). `pnpm --filter @repo/dashboard build` prerenders all six
+routes, and `next dev -H 127.0.0.1` serves `/`, `/appointments`, `/conflicts`, `/queue`, `/actions`,
+and `/audit` with HTTP 200 on loopback. `test/conflict_board.test.ts` and
+`test/operator_queue_board.test.ts` cover every legal and illegal transition; `test/accessibility.test.tsx`
+asserts zero axe-core violations on all five views plus the skip link, `h1`, `aria-sort`, landmark, and
+disabled-reason contracts; `test/keyboard_navigation.test.tsx` covers tab order, keyboard-only
+completion, and focus management; `test/redaction.test.tsx` asserts no customer content reaches any
+payload or rendered surface; `test/appointments_view.test.ts` and `test/fixtures.test.ts` prove foreign
+tenant rows are filtered and counted.
+
+**Not done and deliberately so:** the interface has **no authentication**, holds only synthetic
+fixtures, and resolves its tenant and role on the server (`DASHBOARD_LOCAL_TENANT_ID`,
+`DASHBOARD_LOCAL_ROLE`, default role `operator`) so the browser cannot widen its own scope. Per the P2
+audit it must not be exposed beyond local development until server wiring, database row-level
+security, and the OIDC authentication path land; the dev and start scripts pin the bind to
+`127.0.0.1`. One domain gap was found and left for the wiring work: `OperatorActionService.execute`
+calls `normalize_request` outside its audited try/catch, so a malformed request produces no audit row.
+The UI cannot construct one because reason codes are a bounded select rather than free text.
 
 ## P2.3 Enterprise APIs and integrations
 

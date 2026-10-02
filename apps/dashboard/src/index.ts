@@ -1,9 +1,9 @@
 /**
- * Dashboard placeholder entrypoint.
+ * Shared health surface for the operator dashboard.
  *
- * The staff dashboard (appointment list, approvals) lives here. Until the
- * UI lands, this module only exposes a health check so the app has a
- * verifiable build, typecheck, and test baseline.
+ * The dashboard used to be an executable placeholder that logged this payload
+ * on import. It is now consumed as a module by the overview page, so the
+ * module-scope side effect was removed while the contract stayed identical.
  */
 
 /** Health status reported by the dashboard app. */
@@ -20,5 +20,3 @@ export interface HealthStatus {
 export function get_health(): HealthStatus {
   return { ok: true, app: "dashboard" };
 }
-
-console.log(JSON.stringify(get_health()));
