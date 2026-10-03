@@ -19,6 +19,13 @@
  * being useful after a local deletion: deleting a row cannot un-mint a
  * credential the provider already issued. A failed revoke therefore leaves the
  * grant stored and resolvable so it can be retried.
+ *
+ * The local delete is a compare-and-delete against the grant identity captured
+ * before the Google call, not a delete of whatever the tenant currently holds.
+ * The revoke suspends on a network round trip, so a re-consent can land in that
+ * window; deleting by tenant would then destroy a *different*, still-live
+ * credential that Google never revoked, which is exactly the un-revocable state
+ * two-sided revocation exists to prevent.
  */
 
 import { randomUUID } from "node:crypto";
@@ -170,8 +177,16 @@ export class GoogleTokenGrantStore {
    * retry the revoke from the runbook instead of having lost the only copy of the
    * token needed to attempt it.
    *
+   * The revoke suspends on the provider call, so the tenant may re-consent in that
+   * window. The local delete is therefore a compare-and-delete on the grant id
+   * read before the call: a newer grant is left stored and resolvable, because
+   * Google never invalidated it. No lock is taken, so a revoke cannot block or be
+   * blocked by a consent callback, and grants of other tenants are untouched.
+   *
    * @param tenant_id - Tenant whose grant is being withdrawn.
-   * @returns True once Google has also invalidated the grant.
+   * @returns True when the revoked grant was the stored one and is now gone.
+   * False when a re-consent replaced it mid-call: the revoked grant is gone but
+   * the tenant holds a newer, still-live grant that this call did not revoke.
    * @throws OAuthFlowError when the tenant has no stored grant, when no upstream
    * revoker is wired, or when Google did not accept the revoke. In every failure
    * case the grant is left stored and revocable.
@@ -185,7 +200,8 @@ export class GoogleTokenGrantStore {
     }
     // Checked before anything is decrypted or destroyed, so a store with no
     // revoker refuses without touching the row it could not revoke.
-    const revoke_upstream = this.require_revoker();
+    const revoke_upstream = this.require_revoker(tenant);
+    const revoked_grant_id = grant.grant_id;
     const refresh_token = this.open(grant, tenant);
     try {
       await revoke_upstream(refresh_token);
@@ -197,9 +213,12 @@ export class GoogleTokenGrantStore {
       this.audit("calendar_grant_revoked", "failed", tenant);
       throw new OAuthFlowError("oauth_token_exchange_failed");
     }
-    this.grants.delete(tenant);
-    this.audit("calendar_grant_revoked", "revoked", tenant);
-    return true;
+    const was_stored_grant = this.delete_revoked_grant(tenant, revoked_grant_id);
+    // `revoked` would be a false audit row when a re-consent replaced the grant:
+    // the tenant still holds a credential Google never invalidated. `ok` reports
+    // only what is true — the grant this call revoked is no longer resolvable.
+    this.audit("calendar_grant_revoked", was_stored_grant ? "revoked" : "ok", tenant);
+    return was_stored_grant;
   }
 
   /**
@@ -231,15 +250,34 @@ export class GoogleTokenGrantStore {
   /**
    * Require the injected Google-side revoker before anything is destroyed.
    *
+   * @param tenant_id - Tenant the revoke was requested for, audited on refusal.
    * @returns The wired revoker.
    * @throws OAuthFlowError when none is wired; the store holds no client
    * credentials of its own, so it must not pretend the provider side was cleared.
    */
-  private require_revoker(): (refresh_token: string) => Promise<void> {
+  private require_revoker(tenant_id: string): (refresh_token: string) => Promise<void> {
     if (this.revoke_upstream === undefined) {
+      // An incident responder following the revocation runbook needs to see that
+      // the attempt was refused, so the refusal is audited before it is raised.
+      this.audit("calendar_grant_revoked", "failed", tenant_id);
       throw new OAuthFlowError("oauth_configuration_invalid");
     }
     return this.revoke_upstream;
+  }
+
+  /**
+   * Delete a tenant's grant only while the stored row is still that grant.
+   *
+   * @param tenant_id - Tenant whose row would be retired.
+   * @param grant_id - Identity of the grant whose credential Google just revoked.
+   * @returns True when the stored row was that grant and is now gone; false when
+   * a newer grant already replaced it, in which case that grant is left intact.
+   */
+  private delete_revoked_grant(tenant_id: string, grant_id: string): boolean {
+    const stored = this.grants.get(tenant_id);
+    if (stored === undefined || stored.grant_id !== grant_id) return false;
+    this.grants.delete(tenant_id);
+    return true;
   }
 
   /** Decrypt one grant for its own tenant only. */

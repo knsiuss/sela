@@ -44,6 +44,16 @@ const LOOPBACK_ENV: Record<string, string> = {
   SUPABASE_AUTH_OAUTH_CLIENT_SECRET: "supabase-client-secret",
 };
 
+/** Loopback origin served over https, so the policy issues the `__Host-` cookie. */
+const SECURE_LOOPBACK_ENV: Record<string, string> = {
+  ...LOOPBACK_ENV,
+  STAFF_AUTH_REDIRECT_ALLOW_LIST: "https://127.0.0.1:3000/auth/callback",
+  STAFF_AUTH_LOGIN_REDIRECT_URI: "https://127.0.0.1:3000/auth/callback",
+  STAFF_AUTH_CALENDAR_REDIRECT_URI: "https://127.0.0.1:3000/auth/callback",
+  STAFF_AUTH_PUBLIC_BASE_URL: "https://127.0.0.1:3000",
+  STAFF_AUTH_ALLOW_INSECURE_LOOPBACK: "false",
+};
+
 afterEach(() => {
   reset_runtime();
   vi.restoreAllMocks();
@@ -87,9 +97,18 @@ describe("staff auth composition root", () => {
     expect(revoked).toEqual(["1//0eXa-refresh-token-value"]);
     expect(String(fetch_spy.mock.calls[0]?.[0])).toBe("https://oauth2.googleapis.com/revoke");
     expect(parts.grants.list()).toEqual([]);
+    // RB-15 is answered from this trail, so the grant half has to be in it and
+    // not in a second sink the responder never reads.
+    expect(parts.audit.records).toContainEqual(expect.objectContaining({
+      event: "calendar_grant_revoked",
+      outcome: "revoked",
+      tenant_id: "1001",
+    }));
+    expect(parts.metrics.counter_value("oauth_flow_total", { event: "calendar_grant_revoked", outcome: "revoked" }))
+      .toBeGreaterThan(0);
   });
 
-  it("leaves the grant stored when the composed upstream revoke fails", async () => {
+  it("leaves the grant stored and audited when the composed upstream revoke fails", async () => {
     const parts = loopback_runtime();
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("", { status: 500 }));
     await parts.grants.store({
@@ -101,6 +120,43 @@ describe("staff auth composition root", () => {
     });
     await expect(revoke_google_grant(parts, "1001")).rejects.toMatchObject({ code: "oauth_token_exchange_failed" });
     await expect(parts.grants.resolve_refresh_token("1001")).resolves.toBe("1//0eXa-refresh-token-value");
+    expect(parts.audit.records).toContainEqual(expect.objectContaining({
+      event: "calendar_grant_revoked",
+      outcome: "failed",
+    }));
+  });
+
+  it("keeps a re-consent that lands during an in-flight revoke", async () => {
+    const parts = loopback_runtime();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      await gate;
+      return new Response("", { status: 200 });
+    });
+    await parts.grants.store({
+      tenant_id: "1001",
+      google_subject_id: "google-subject",
+      authorized_by_subject_id: "staff-subject-1",
+      scopes: ["https://www.googleapis.com/auth/calendar.events"],
+      refresh_token: "1//0eXa-first-refresh-token",
+    });
+    const revoking = revoke_google_grant(parts, "1001");
+    await Promise.resolve();
+    await parts.grants.store({
+      tenant_id: "1001",
+      google_subject_id: "google-subject",
+      authorized_by_subject_id: "staff-subject-1",
+      scopes: ["https://www.googleapis.com/auth/calendar.events"],
+      refresh_token: "1//0eXa-second-refresh-token",
+    });
+    release();
+    // The revoke retires only the credential Google invalidated, so the newer
+    // grant stays resolvable and the audit does not claim it was revoked.
+    await expect(revoking).resolves.toBe(false);
+    await expect(parts.grants.resolve_refresh_token("1001")).resolves.toBe("1//0eXa-second-refresh-token");
+    const revoke_records = parts.audit.records.filter((record) => record.event === "calendar_grant_revoked");
+    expect(revoke_records.map((record) => record.outcome)).toEqual(["ok"]);
   });
 
   it("holds one signing-key cache per configured provider", () => {
@@ -110,13 +166,38 @@ describe("staff auth composition root", () => {
   });
 });
 
+describe("signing-key cache lifetime", () => {
+  it("defaults to the previous five-minute window when unset", () => {
+    expect(loopback_runtime().key_sets.get("supabase")?.jwks_cache_ms).toBe(300_000);
+  });
+
+  it("takes the configured window from STAFF_AUTH_JWKS_CACHE_MS", () => {
+    const parts = runtime({ ...LOOPBACK_ENV, STAFF_AUTH_JWKS_CACHE_MS: "30" });
+    expect(parts.key_sets.get("supabase")?.jwks_cache_ms).toBe(30_000);
+  });
+
+  it("refuses an out-of-range window at startup instead of defaulting", () => {
+    for (const value of ["29", "3601", "0", "-60", "30.5", "not-a-number"]) {
+      expect(() => runtime({ ...LOOPBACK_ENV, STAFF_AUTH_JWKS_CACHE_MS: value }), value).toThrow(OAuthFlowError);
+    }
+  });
+});
+
 describe("route helpers", () => {
   it("builds a post-credential redirect on the configured origin, not the request host", () => {
     const parts = loopback_runtime();
     expect(workspace_redirect(parts, "/actions")).toBe("http://127.0.0.1:3000/actions");
     expect(workspace_redirect(parts, "/actions?calendar=1001")).toBe("http://127.0.0.1:3000/actions?calendar=1001");
-    for (const path of ["https://evil.example/x", "//evil.example/x", "/actions/../admin"]) {
-      expect(() => workspace_redirect(parts, path)).toThrow(OAuthFlowError);
+    // The backslash forms satisfy a "starts with `/`" shape check and still parse
+    // to a foreign authority, so the resolved origin is what gets compared.
+    for (const path of [
+      "https://evil.example/x",
+      "//evil.example/x",
+      "/actions/../admin",
+      "/\\evil.example",
+      "/\\/evil.example",
+    ]) {
+      expect(() => workspace_redirect(parts, path), path).toThrow(OAuthFlowError);
     }
   });
 
@@ -157,12 +238,36 @@ describe("route helpers", () => {
     }
   });
 
-  it("reads the session cookie under either policy name", () => {
-    expect(read_session_cookie("__Host-sel_session=abc.def")).toBe("abc.def");
-    expect(read_session_cookie("sel_session=abc.def")).toBe("abc.def");
-    expect(read_session_cookie("other=1; sel_session=abc.def")).toBe("abc.def");
-    expect(read_session_cookie(null)).toBeUndefined();
-    expect(read_session_cookie("other=1")).toBeUndefined();
+  it("reads the session cookie under the policy's name, not the header's order", () => {
+    const parts = loopback_runtime();
+    expect(parts.config.cookie.name).toBe("sel_session");
+    expect(read_session_cookie(parts, "__Host-sel_session=abc.def")).toBe("abc.def");
+    expect(read_session_cookie(parts, "sel_session=abc.def")).toBe("abc.def");
+    expect(read_session_cookie(parts, "other=1; sel_session=abc.def")).toBe("abc.def");
+    expect(read_session_cookie(parts, null)).toBeUndefined();
+    expect(read_session_cookie(parts, "other=1")).toBeUndefined();
+    // Both names present: the policy decides, so this surface and the Server
+    // Component reader resolve the same session instead of different tenants.
+    expect(read_session_cookie(parts, "sel_session=plain; __Host-sel_session=hosted")).toBe("plain");
+  });
+
+  it("resolves the same session on both readers when a browser sends both names", async () => {
+    const { select_session_cookie } = await import("appointment-agent/dist/src/enterprise/oauth/index.js");
+    const insecure = loopback_runtime();
+    reset_runtime();
+    const secure = runtime(SECURE_LOOPBACK_ENV);
+    expect(secure.config.cookie.name).toBe("__Host-sel_session");
+    // Header order used to decide here, so a page could render as one tenant
+    // while a route handler action executed as another.
+    const header = "sel_session=plain; __Host-sel_session=hosted";
+    const jar_lookup = (name: string) => new Map([
+      ["sel_session", "plain"],
+      ["__Host-sel_session", "hosted"],
+    ]).get(name);
+    for (const [parts, expected] of [[insecure, "plain"], [secure, "hosted"]] as const) {
+      expect(read_session_cookie(parts, header)).toBe(expected);
+      expect(select_session_cookie(parts.config.cookie, jar_lookup)).toBe(expected);
+    }
   });
 
   it("maps a flow failure to its sanitized status and message", () => {

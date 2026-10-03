@@ -64,6 +64,21 @@ async function grant_with_revoker(revoke_upstream: (refresh_token: string) => Pr
   return parts;
 }
 
+/** A revoker that parks until the returned release function is called. */
+function gated_revoker() {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const calls: string[] = [];
+  return {
+    calls,
+    release: () => release(),
+    revoke_upstream: async (refresh_token: string) => {
+      calls.push(refresh_token);
+      await gate;
+    },
+  };
+}
+
 describe("Google refresh tokens are encrypted at rest", () => {
   it("never stores the plaintext refresh token in any persisted row", async () => {
     const { store } = await store_grant("1001");
@@ -173,6 +188,62 @@ describe("grant revocation is two-sided", () => {
     const { store } = await store_grant("1001");
     await store.mark_unusable("1001");
     await expect(store.resolve_refresh_token("1001")).rejects.toMatchObject({ code: "oauth_membership_unresolved" });
+  });
+});
+
+describe("a concurrent re-consent cannot be destroyed by an in-flight revoke", () => {
+  it("keeps the grant stored mid-call and never claims it was revoked", async () => {
+    const revoker = gated_revoker();
+    const { store, sink } = build_store({ revoke_upstream: revoker.revoke_upstream });
+    await store.store(REFRESH_INPUT("1001"));
+    const revoking = store.revoke_google_grant("1001");
+    await Promise.resolve();
+
+    // The revoke is suspended inside the Google call when the operator completes
+    // a fresh consent for the same tenant.
+    await store.store({ ...REFRESH_INPUT("1001"), refresh_token: "1//0g-second-refresh-token" });
+    revoker.release();
+    await expect(revoking).resolves.toBe(false);
+
+    // The replaced grant still resolves: deleting it would have stranded a
+    // credential Google never revoked, which is the un-revocable state this
+    // store exists to prevent.
+    await expect(store.resolve_refresh_token("1001")).resolves.toBe("1//0g-second-refresh-token");
+    expect(store.list("1001")).toHaveLength(1);
+    const revoke_outcomes = sink.records
+      .filter((record) => record.event === "calendar_grant_revoked")
+      .map((record) => record.outcome);
+    expect(revoke_outcomes).toEqual(["ok"]);
+    expect(revoke_outcomes).not.toContain("revoked");
+  });
+
+  it("never lets a revoke for one tenant touch another tenant's grant", async () => {
+    const revoker = gated_revoker();
+    const { store } = build_store({ revoke_upstream: revoker.revoke_upstream });
+    await store.store(REFRESH_INPUT("1001"));
+    await store.store({ ...REFRESH_INPUT("2002"), refresh_token: "1//0g-other-tenant-token" });
+    const revoking = store.revoke_google_grant("1001");
+    await Promise.resolve();
+    revoker.release();
+    await expect(revoking).resolves.toBe(true);
+
+    expect(revoker.calls).toEqual([REFRESH_TOKEN]);
+    expect(store.list()).toEqual([expect.objectContaining({ tenant_id: "2002" })]);
+    await expect(store.resolve_refresh_token("2002")).resolves.toBe("1//0g-other-tenant-token");
+  });
+});
+
+describe("revocation refusals leave audit evidence", () => {
+  it("audits the refusal when no upstream revoker is wired", async () => {
+    const { store, sink } = await store_grant("1001");
+    await expect(store.revoke_google_grant("1001")).rejects.toMatchObject({ code: "oauth_configuration_invalid" });
+    // An incident responder following RB-15 finds a row, not silence.
+    expect(sink.records).toContainEqual(expect.objectContaining({
+      event: "calendar_grant_revoked",
+      outcome: "failed",
+      tenant_id: "1001",
+    }));
+    expect(store.list()).toHaveLength(1);
   });
 });
 

@@ -19,7 +19,7 @@ export async function GET(request: Request): Promise<Response> {
   const url = new URL(request.url);
   try {
     const parts = runtime();
-    const principal = await principal_from_cookie(parts, read_session_cookie(request.headers.get("cookie")));
+    const principal = await principal_from_cookie(parts, read_session_cookie(parts, request.headers.get("cookie")));
     const result = await finish_calendar_consent(parts, principal, read_callback_params(url));
     return new Response(null, {
       status: 302,

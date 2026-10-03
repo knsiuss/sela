@@ -18,7 +18,6 @@ const LOGIN_PATH = "/auth/login";
  * @returns A redirect to the login page with the cookie cleared.
  */
 export async function POST(request: Request): Promise<Response> {
-  const cookie_value = read_session_cookie(request.headers.get("cookie"));
   const origin = request.headers.get("origin");
   const url = new URL(request.url);
   if (origin !== null && origin !== url.origin) return new Response("cross_origin_logout_refused", { status: 403 });
@@ -28,7 +27,7 @@ export async function POST(request: Request): Promise<Response> {
       status: 302,
       headers: {
         Location: workspace_redirect(parts, LOGIN_PATH),
-        "Set-Cookie": await revoke_session(parts, cookie_value),
+        "Set-Cookie": await revoke_session(parts, read_session_cookie(parts, request.headers.get("cookie"))),
       },
     });
   } catch {

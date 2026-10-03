@@ -68,10 +68,23 @@ export interface StaffAuthConfig {
   /** Google Calendar scopes requested during consent. */
   calendar_scopes: readonly string[];
   session_ttl_seconds: number;
+  /**
+   * Signing-key cache lifetime in milliseconds.
+   *
+   * This is the window in which a key the issuer has already rotated or
+   * emergency-revoked keeps validating locally, so it is configuration rather
+   * than a constant: a deployment balancing rotation downtime against that
+   * window picks it deliberately, and a value outside the supported bounds is
+   * refused at startup instead of being rounded into something believable.
+   */
+  jwks_cache_ms: number;
 }
 
 /** Environment variable holding a comma-separated or JSON redirect list. */
 export const REDIRECT_ALLOW_LIST_ENV = "STAFF_AUTH_REDIRECT_ALLOW_LIST";
+
+/** Environment variable holding the signing-key cache lifetime in seconds. */
+export const JWKS_CACHE_MS_ENV = "STAFF_AUTH_JWKS_CACHE_MS";
 
 /** Scopes requested for Calendar; read/write events plus read-only metadata. */
 export const DEFAULT_CALENDAR_SCOPES: readonly string[] = [
@@ -82,6 +95,9 @@ export const DEFAULT_CALENDAR_SCOPES: readonly string[] = [
 const MAX_SECRET_CHARS = 512;
 const MAX_ALLOW_LIST_ENTRIES = 8;
 const MAX_PUBLIC_BASE_URL_CHARS = 2048;
+const MIN_JWKS_CACHE_SECONDS = 30;
+const MAX_JWKS_CACHE_SECONDS = 3_600;
+const DEFAULT_JWKS_CACHE_SECONDS = 300;
 const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const HOSTED_DOMAIN_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
 
@@ -119,6 +135,7 @@ export function parse_staff_auth_config(env: Record<string, string | undefined> 
     cookie,
     calendar_scopes: parse_calendar_scopes(env["STAFF_AUTH_CALENDAR_SCOPES_JSON"]),
     session_ttl_seconds: ttl,
+    jwks_cache_ms: require_jwks_cache_ms(env[JWKS_CACHE_MS_ENV]),
   };
 }
 
@@ -351,4 +368,30 @@ function require_ttl(raw: string | undefined): number {
     throw new OAuthFlowError("oauth_configuration_invalid");
   }
   return parsed;
+}
+
+/**
+ * Read the signing-key cache lifetime, in seconds, from the environment.
+ *
+ * An absent value keeps the previous five-minute default. A value that is
+ * present but out of bounds, fractional, or not a number is a configuration
+ * error rather than a silent fallback: an operator must not believe a rotation
+ * window is in force when the value they set was ignored.
+ *
+ * @param raw - Raw `STAFF_AUTH_JWKS_CACHE_MS` value.
+ * @returns The cache lifetime in milliseconds.
+ * @throws OAuthFlowError when the value is not a whole number of seconds in
+ * [30, 3600].
+ */
+function require_jwks_cache_ms(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_JWKS_CACHE_SECONDS * 1_000;
+  const parsed = Number(raw);
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed < MIN_JWKS_CACHE_SECONDS ||
+    parsed > MAX_JWKS_CACHE_SECONDS
+  ) {
+    throw new OAuthFlowError("oauth_configuration_invalid");
+  }
+  return parsed * 1_000;
 }

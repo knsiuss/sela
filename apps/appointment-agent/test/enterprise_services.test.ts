@@ -52,7 +52,9 @@ describe("enterprise service boundaries", () => {
     const unknown_signature = sign("RSA-SHA256", Buffer.from(`${unknown_header}.${payload}`), privateKey).toString("base64url");
     await expect(verifier.verify(`${unknown_header}.${payload}.${unknown_signature}`))
       .rejects.toMatchObject({ name: "AuthorizationError", code: "unauthenticated" });
-    expect(fetch_mock).toHaveBeenCalledTimes(1);
+    // Cold load plus the one bounded compensating refetch an unknown kid earns;
+    // further unknown kids inside the cooldown cost no request at all.
+    expect(fetch_mock).toHaveBeenCalledTimes(2);
   });
 
   it("rejects algorithm confusion and invalid registered claims before JWKS use", async () => {

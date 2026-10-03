@@ -3,9 +3,11 @@
  *
  * Both staff login and the Google Calendar consent flow use the same generator,
  * so a code can only be exchanged by the process that started the flow. The
- * verifier is treated as a short-lived secret: it is stored hashed inside the
- * state record, and it is never logged, returned to a browser, or included in an
- * error message.
+ * verifier is treated as a short-lived secret: it is held in the clear in the
+ * state record because `complete_authorization` has to present it to the token
+ * endpoint, and it is never logged, returned to a browser, or included in an
+ * error message. Its exposure is bounded by the single-use, expiring state
+ * record, not by hashing.
  */
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";

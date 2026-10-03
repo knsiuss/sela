@@ -1,39 +1,40 @@
 /**
  * Helpers every staff-auth route needs, in one place.
  *
- * Three things were duplicated across the login, callback, Calendar, and logout
+ * Four things were duplicated across the login, callback, Calendar, and logout
  * routes, and duplication is how the two copies drift:
  *
  * - The session cookie was read by a private copy in each route, so a cookie
- *   name added to one policy would silently stop being honoured in another.
+ *   name added to one policy would silently stop being honoured in another. The
+ *   precedence now lives in one policy-ordered reader in the auth boundary; both
+ *   the route reader and the Server Component reader delegate to it.
  * - `status_for` / `safe_message` were re-typed per route, which is how a route
  *   ends up surfacing a provider's own wording.
  * - Post-credential redirects were built from `url.origin`, i.e. from the
  *   request's `Host` header. A freshly issued session cookie was then placed in
  *   a `Location` that pointed wherever the caller named. The redirect target is
  *   configuration (`STAFF_AUTH_PUBLIC_BASE_URL`), never request input.
+ * - String shape alone cannot decide whether a path stays same-origin: WHATWG
+ *   normalizes backslashes to slashes, so `/\evil.example` parses as an
+ *   authority. The resolved origin is therefore compared, not the input string.
  */
 
-import { OAuthFlowError } from "appointment-agent/dist/src/enterprise/oauth/index.js";
+import {
+  OAuthFlowError,
+  read_session_cookie_header,
+} from "appointment-agent/dist/src/enterprise/oauth/index.js";
 import type { StaffAuthRuntime } from "./runtime";
-
-/** Cookie names the policy can produce; `__Host-` when the cookie is Secure. */
-const COOKIE_NAMES: readonly string[] = ["__Host-sel_session", "sel_session"];
 
 /**
  * Extract the session cookie from a `Cookie` request header.
  *
+ * @param parts - Resolved runtime supplying the cookie policy.
  * @param header - Raw `Cookie` request header.
  * @returns The cookie value, or undefined when no session cookie is present.
+ * @throws OAuthFlowError when the cookie policy is inconsistent.
  */
-export function read_session_cookie(header: string | null): string | undefined {
-  if (header === null) return undefined;
-  for (const part of header.split(";")) {
-    const [name, ...rest] = part.trim().split("=");
-    if (name === undefined) continue;
-    if (COOKIE_NAMES.includes(name)) return rest.join("=");
-  }
-  return undefined;
+export function read_session_cookie(parts: StaffAuthRuntime, header: string | null): string | undefined {
+  return read_session_cookie_header(header, parts.config.cookie);
 }
 
 /**
@@ -64,14 +65,30 @@ export function safe_message(error: unknown): string {
  * caller-influenceable, so deriving it here would let a poisoned header steer a
  * browser carrying a session cookie to an attacker origin.
  *
+ * The shape check rejects the obvious absolute and traversing forms, and the
+ * resolved origin is then compared against the configured one. Comparing the
+ * result rather than the string is what closes the backslash forms
+ * (`/\host`, `/\/host`), which pass a "starts with `/`" test and still parse to
+ * a foreign authority.
+ *
  * @param parts - Resolved runtime supplying the configured public origin.
  * @param path - Allow-listed relative path to return to.
  * @returns Absolute URL on the configured origin.
- * @throws OAuthFlowError when the path is absolute or traverses.
+ * @throws OAuthFlowError when the path is absolute, traverses, or resolves off
+ * the configured origin.
  */
 export function workspace_redirect(parts: StaffAuthRuntime, path: string): string {
   if (typeof path !== "string" || !path.startsWith("/") || path.startsWith("//") || path.includes("..")) {
     throw new OAuthFlowError("oauth_return_path_invalid");
   }
-  return new URL(path, parts.config.public_base_url).toString();
+  let resolved: URL;
+  try {
+    resolved = new URL(path, parts.config.public_base_url);
+  } catch {
+    throw new OAuthFlowError("oauth_return_path_invalid");
+  }
+  if (resolved.origin !== new URL(parts.config.public_base_url).origin) {
+    throw new OAuthFlowError("oauth_return_path_invalid");
+  }
+  return resolved.toString();
 }

@@ -19,6 +19,20 @@ import { build_fixture_principal } from "./support/fixture_principal.js";
 const TENANT_ID = "1001";
 
 /**
+ * The permissions the enterprise contract declares second-factor gated.
+ *
+ * Stated here rather than read from `MFA_GATED_PERMISSIONS`: an oracle derived
+ * from the set under test passes for any set at all, so dropping
+ * `appointments:cancel` from the gate would leave every other assertion in this
+ * file green.
+ */
+const GATED_PERMISSIONS: readonly EnterprisePermission[] = [
+  "outbound:replay",
+  "appointments:cancel",
+  "tenant:manage",
+];
+
+/**
  * The action-to-permission mapping this boundary applies, restated here on
  * purpose: a mapping change that is not mirrored in this table fails the
  * classification assertions below instead of passing unnoticed.
@@ -49,6 +63,29 @@ function contract_requires_mfa(permission: EnterprisePermission): boolean {
 }
 
 describe("MFA-gate classification of every audited action", () => {
+  it("gates every permission the contract declares gated, including cancellation", () => {
+    for (const permission of GATED_PERMISSIONS) {
+      expect(permission_requires_mfa(permission), permission).toBe(true);
+      const unverified = build_fixture_principal(TENANT_ID, "owner", false);
+      expect(() => authorize_privileged(unverified, TENANT_ID, permission), permission)
+        .toThrow(/mfa-required/u);
+    }
+    // The permission whose loss of gating is the one that must never be silent.
+    expect(permission_requires_mfa("appointments:cancel")).toBe(true);
+  });
+
+  it("gates nothing beyond the declared permissions", () => {
+    const ungated: EnterprisePermission[] = [
+      "appointments:read", "appointments:reschedule", "handoff:read",
+      "outbound:status:read", "audit:read", "analytics:read",
+    ];
+    const unverified = build_fixture_principal(TENANT_ID, "owner", false);
+    for (const permission of ungated) {
+      expect(permission_requires_mfa(permission), permission).toBe(false);
+      expect(() => authorize_privileged(unverified, TENANT_ID, permission), permission).not.toThrow();
+    }
+  });
+
   it("covers the whole action union", () => {
     expect(Object.keys(ACTION_PERMISSIONS).sort()).toEqual([...OPERATOR_ACTIONS].sort());
   });

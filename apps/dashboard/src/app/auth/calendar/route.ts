@@ -20,7 +20,7 @@ export async function GET(request: Request): Promise<Response> {
   const tenant_id = url.searchParams.get("tenant_id") ?? "";
   try {
     const parts = runtime();
-    const principal = await principal_from_cookie(parts, read_session_cookie(request.headers.get("cookie")));
+    const principal = await principal_from_cookie(parts, read_session_cookie(parts, request.headers.get("cookie")));
     const { url: destination } = await start_calendar_consent(parts, principal, tenant_id);
     return Response.redirect(destination, 302);
   } catch (error) {

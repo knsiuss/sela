@@ -60,8 +60,10 @@ export {
   hash_session_secret,
   issue_session_secret,
   parse_session_cookie,
+  read_session_cookie_header,
   resolve_session_cookie_policy,
   secret_matches,
+  select_session_cookie,
   serialize_session_cookie,
 } from "./session_cookie.js";
 export type { IssuedSessionSecret, SessionCookieConfig, SessionCookiePolicy } from "./session_cookie.js";
@@ -75,6 +77,7 @@ export type {
 export {
   REDIRECT_ALLOW_LIST_ENV,
   DEFAULT_CALENDAR_SCOPES,
+  JWKS_CACHE_MS_ENV,
   is_loopback_public_base_url,
   parse_staff_auth_config,
   require_provider,

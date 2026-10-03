@@ -9,12 +9,9 @@
  */
 
 import { cookies } from "next/headers";
-import { OAuthFlowError } from "appointment-agent/dist/src/enterprise/oauth/index.js";
+import { OAuthFlowError, select_session_cookie } from "appointment-agent/dist/src/enterprise/oauth/index.js";
 import type { AuthenticatedPrincipal } from "appointment-agent/dist/src/enterprise/authorization.js";
-import { principal_from_cookie, runtime } from "./runtime";
-
-/** Cookie names the policy can produce; `__Host-` when the cookie is Secure. */
-const COOKIE_NAMES: readonly string[] = ["__Host-sel_session", "sel_session"];
+import { principal_from_cookie, runtime, type StaffAuthRuntime } from "./runtime";
 
 /**
  * Resolve the current request's principal, or null when unauthenticated.
@@ -27,7 +24,7 @@ const COOKIE_NAMES: readonly string[] = ["__Host-sel_session", "sel_session"];
 export async function optional_session_principal(): Promise<AuthenticatedPrincipal | null> {
   try {
     const parts = runtime();
-    return await principal_from_cookie(parts, await read_session_cookie());
+    return await principal_from_cookie(parts, await read_session_cookie(parts));
   } catch {
     return null;
   }
@@ -48,13 +45,14 @@ export async function require_session_principal(): Promise<AuthenticatedPrincipa
 /**
  * Read the raw session cookie value from the incoming request.
  *
+ * Precedence comes from the cookie policy in the shared reader rather than from
+ * the cookie jar's order, so this surface and the route handlers resolve the
+ * same session when a browser sends both names.
+ *
+ * @param parts - Resolved runtime supplying the cookie policy.
  * @returns The cookie value, or undefined when no session cookie is present.
  */
-export async function read_session_cookie(): Promise<string | undefined> {
+export async function read_session_cookie(parts: StaffAuthRuntime): Promise<string | undefined> {
   const jar = await cookies();
-  for (const name of COOKIE_NAMES) {
-    const value = jar.get(name)?.value;
-    if (value !== undefined && value !== "") return value;
-  }
-  return undefined;
+  return select_session_cookie(parts.config.cookie, (name) => jar.get(name)?.value);
 }

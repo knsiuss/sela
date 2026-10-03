@@ -53,6 +53,7 @@ import {
 import { GoogleTokenGrantStore } from "appointment-agent/dist/src/enterprise/google_token_grants.js";
 import { create_signing_key_set } from "appointment-agent/dist/src/enterprise/oidc_verifier.js";
 import type { SigningKeySet } from "appointment-agent/dist/src/enterprise/oidc_verifier.js";
+import { MetricsRegistry } from "appointment-agent/dist/src/observability/metrics.js";
 import { create_tenant_secret_cipher } from "appointment-agent/dist/src/security/tenant_secret_cipher.js";
 import { parse_recipient_key_ring } from "appointment-agent/dist/src/security/recipient_key_ring.js";
 import type { AuthenticatedPrincipal, EnterpriseRole } from "appointment-agent/dist/src/enterprise/authorization.js";
@@ -72,7 +73,16 @@ export interface StaffAuthRuntime {
   session_store: StaffSessionStore;
   directory: InMemoryStaffDirectory;
   grants: GoogleTokenGrantStore;
+  /**
+   * The one OAuth audit sink for this process.
+   *
+   * Grant events land in the same sink as session and login events: an incident
+   * responder following the revocation runbook reads one trail, and a second sink
+   * would silently split the grant half of it away.
+   */
   audit: InMemoryOAuthAuditSink;
+  /** Process metrics sink; grant and session events both increment it. */
+  metrics: MetricsRegistry;
   /**
    * One signing-key cache per provider, held for the process lifetime so the
    * JWKS endpoint is fetched once per key rotation rather than once per login.
@@ -102,18 +112,26 @@ export function runtime(env: Record<string, string | undefined> = process.env): 
   // three ports and removes the restriction.
   if (!is_loopback_public_base_url(config)) throw new OAuthFlowError("oauth_configuration_invalid");
   const ring = parse_recipient_key_ring(env);
+  // One sink for every OAuth event in the process. Two sinks would leave the
+  // grant half of the audit trail unreadable to whoever follows RB-15.
+  const audit = new InMemoryOAuthAuditSink();
+  const metrics = new MetricsRegistry();
   cached_runtime = {
     config,
     state_store: new InMemoryOAuthStateStore(),
     session_store: new InMemoryStaffSessionStore(),
     directory: parse_staff_directory(env["STAFF_DIRECTORY_JSON"]),
     grants: new GoogleTokenGrantStore(create_tenant_secret_cipher(ring), {
-      sink: new InMemoryOAuthAuditSink(),
+      sink: audit,
+      // Without a counter the grant half of `oauth_flow_total` never moves, so a
+      // revoked or refused grant would be invisible to alerting.
+      metrics,
       // Without a revoker the store refuses to revoke, which would leave a
       // suspected leak with no way to un-mint the credential at the provider.
       revoke_upstream: google_grant_revoker(),
     }),
-    audit: new InMemoryOAuthAuditSink(),
+    audit,
+    metrics,
     key_sets: build_key_sets(config),
   };
   return cached_runtime;
@@ -132,6 +150,7 @@ function build_key_sets(config: StaffAuthConfig): ReadonlyMap<IdProviderConfig["
       issuer_url: provider.issuer_url,
       jwks_url: provider.jwks_url,
       audience: provider.staff_audience,
+      jwks_cache_ms: config.jwks_cache_ms,
     }));
   }
   return key_sets;
@@ -327,7 +346,10 @@ export async function principal_from_cookie(
  *
  * @param parts - Resolved runtime.
  * @param tenant_id - Tenant whose grant is being withdrawn.
- * @returns True once Google has invalidated the grant and the local row is gone.
+ * @returns True once Google has invalidated the stored grant and its local row is
+ * gone; false when a re-consent replaced that grant while Google was being
+ * called, in which case the newer grant stays stored and still needs its own
+ * revoke.
  * @throws OAuthFlowError when there is no grant, or when Google did not accept
  * the revoke. The grant stays stored and revocable in either failure case.
  */

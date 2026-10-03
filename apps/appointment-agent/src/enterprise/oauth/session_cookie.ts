@@ -183,6 +183,64 @@ export function serialize_session_cookie(
 }
 
 /**
+ * Read the session cookie out of a raw `Cookie` request header.
+ *
+ * Two readers used to disagree about precedence — one took the first matching
+ * name in header order, the other walked the names — so
+ * `sel_session=plain; __Host-sel_session=hosted` could render a page as one
+ * tenant and execute an action as another.
+ *
+ * @param header - Raw `Cookie` request header, or null when absent.
+ * @param policy - Policy naming the cookie this deployment issues.
+ * @returns The cookie value from the highest-precedence name present.
+ * @throws OAuthFlowError when the policy is internally inconsistent.
+ */
+export function read_session_cookie_header(
+  header: string | null | undefined,
+  policy: SessionCookiePolicy,
+): string | undefined {
+  if (typeof header !== "string" || header === "") return undefined;
+  const values = new Map<string, string>();
+  for (const part of header.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator <= 0) continue;
+    const name = part.slice(0, separator).trim();
+    if (!values.has(name)) values.set(name, part.slice(separator + 1));
+  }
+  return select_session_cookie(policy, (name) => values.get(name));
+}
+
+/**
+ * Select the session cookie value from a policy-ordered name lookup.
+ *
+ * Precedence is the policy's, not the header's or the jar's, so both names
+ * present resolves to one session on every surface that reads it.
+ *
+ * @param policy - Policy naming the cookie this deployment issues.
+ * @param lookup - Resolves one cookie name to its value, or undefined.
+ * @returns The value of the first name in policy order that has one.
+ * @throws OAuthFlowError when the policy is internally inconsistent.
+ */
+export function select_session_cookie(
+  policy: SessionCookiePolicy,
+  lookup: (name: string) => string | undefined,
+): string | undefined {
+  if (typeof lookup !== "function") throw new OAuthFlowError("oauth_configuration_invalid");
+  require_policy(policy);
+  // The counterpart name is still read, so a deployment that flipped `Secure`
+  // mid-session does not log every operator out, but it can never shadow the
+  // cookie the current policy issues.
+  const names = policy.name === SECURE_SESSION_COOKIE_NAME
+    ? [SECURE_SESSION_COOKIE_NAME, INSECURE_SESSION_COOKIE_NAME]
+    : [INSECURE_SESSION_COOKIE_NAME, SECURE_SESSION_COOKIE_NAME];
+  for (const name of names) {
+    const value = lookup(name);
+    if (typeof value === "string" && value !== "") return value;
+  }
+  return undefined;
+}
+
+/**
  * Compare a candidate secret against a stored hash in constant time.
  *
  * @param candidate_secret - Secret parsed from the cookie.

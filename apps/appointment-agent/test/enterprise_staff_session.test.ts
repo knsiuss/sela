@@ -13,8 +13,10 @@ import {
   hash_session_secret,
   issue_session_secret,
   parse_session_cookie,
+  read_session_cookie_header,
   resolve_session_cookie_policy,
   secret_matches,
+  select_session_cookie,
   serialize_session_cookie,
 } from "../src/enterprise/oauth/session_cookie.js";
 import { InMemoryStaffSessionStore, session_principal } from "../src/enterprise/oauth/staff_session_store.js";
@@ -117,6 +119,30 @@ describe("session cookie policy", () => {
     expect(header).toContain("Max-Age=0");
     expect(header).toContain("HttpOnly");
     expect(header).toContain("Secure");
+  });
+
+  it("resolves the cookie by policy order, not by header or jar order", () => {
+    const secure = resolve_session_cookie_policy({
+      public_base_url: "https://staff.example.com",
+      allow_insecure_loopback: false,
+      session_ttl_seconds: 3600,
+    });
+    const insecure = resolve_session_cookie_policy({
+      public_base_url: "http://127.0.0.1:3000",
+      allow_insecure_loopback: true,
+      session_ttl_seconds: 3600,
+    });
+    // A browser can legitimately carry both names; the policy decides, so every
+    // surface resolves the same session instead of a different tenant each.
+    const both = `${INSECURE_SESSION_COOKIE_NAME}=plain; ${SECURE_SESSION_COOKIE_NAME}=hosted`;
+    expect(read_session_cookie_header(both, secure)).toBe("hosted");
+    expect(read_session_cookie_header(both, insecure)).toBe("plain");
+    const jar = new Map([[INSECURE_SESSION_COOKIE_NAME, "plain"], [SECURE_SESSION_COOKIE_NAME, "hosted"]]);
+    expect(select_session_cookie(secure, (name) => jar.get(name))).toBe("hosted");
+    expect(select_session_cookie(insecure, (name) => jar.get(name))).toBe("plain");
+    expect(read_session_cookie_header(`${INSECURE_SESSION_COOKIE_NAME}=only`, secure)).toBe("only");
+    expect(read_session_cookie_header("other=1", secure)).toBeUndefined();
+    expect(read_session_cookie_header(null, secure)).toBeUndefined();
   });
 
   it("mints a fresh id and secret each time and stores only a hash", () => {

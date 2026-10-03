@@ -50,7 +50,8 @@ describe("OIDC verification boundaries", () => {
     ).toString("base64url");
     await expect(verifier.verify(`${unknown_header}.${payload}.${unknown_signature}`))
       .rejects.toMatchObject({ name: "AuthorizationError", code: "unauthenticated" });
-    expect(fetch_mock).toHaveBeenCalledTimes(1);
+    // Cold load, then the one bounded compensating refetch an unknown kid earns.
+    expect(fetch_mock).toHaveBeenCalledTimes(2);
   });
 
   it("rejects algorithm confusion and invalid registered claims before JWKS use", async () => {
@@ -177,6 +178,133 @@ describe("OIDC verification boundaries", () => {
     expect(jwks_fetches).toBe(2);
   });
 });
+
+describe("JWKS cache lifetime and the compensating refetch", () => {
+  it("keeps accepting a rotated-away key until the cache lifetime elapses", async () => {
+    const issuer = rotating_issuer();
+    const key_set = create_signing_key_set({ ...SHARED_JWT_OPTIONS, fetch: issuer.fetch, clock: issuer.clock });
+    expect(key_set.jwks_cache_ms).toBe(300_000);
+    await expect(key_set.find("shared-key")).resolves.toBeDefined();
+    issuer.rotate();
+    issuer.now_ms = 299_000;
+    // This is the staleness window the TTL controls: the issuer has dropped the
+    // key and the cache still honours it.
+    await expect(key_set.find("shared-key")).resolves.toBeDefined();
+  });
+
+  it("accepts a rotated key on the first unknown-kid refetch", async () => {
+    const issuer = rotating_issuer();
+    const key_set = create_signing_key_set({ ...SHARED_JWT_OPTIONS, fetch: issuer.fetch, clock: issuer.clock });
+    const verifier = new OidcJwtVerifier({ ...SHARED_JWT_OPTIONS, key_set, clock: issuer.clock });
+    await expect(verifier.verify(issuer.sign_for("shared-key"))).resolves.toBeDefined();
+    expect(issuer.fetches).toBe(1);
+    issuer.rotate();
+    issuer.now_ms = 299_000;
+    // Still inside the five-minute window, so only the bounded compensating
+    // refetch can make the new key usable on the login path.
+    await expect(verifier.verify(issuer.sign_for("rotated-key"))).resolves.toBeDefined();
+    expect(issuer.fetches).toBe(2);
+  });
+
+  it("shortens the observed window when the configured TTL is short", async () => {
+    const issuer = rotating_issuer();
+    const key_set = create_signing_key_set({
+      ...SHARED_JWT_OPTIONS,
+      jwks_cache_ms: 30_000,
+      fetch: issuer.fetch,
+      clock: issuer.clock,
+    });
+    expect(key_set.jwks_cache_ms).toBe(30_000);
+    await expect(key_set.find("shared-key")).resolves.toBeDefined();
+    issuer.rotate();
+    issuer.now_ms = 29_000;
+    await expect(key_set.find("shared-key")).resolves.toBeDefined();
+    issuer.now_ms = 30_000;
+    // The same rotation would still be cached at this point under the default.
+    await expect(key_set.find("shared-key")).rejects.toMatchObject({ code: "unauthenticated" });
+  });
+
+  it("spends at most one refetch per cooldown window on unknown key ids", async () => {
+    const issuer = rotating_issuer();
+    const key_set = create_signing_key_set({
+      ...SHARED_JWT_OPTIONS,
+      jwks_refetch_cooldown_ms: 30_000,
+      fetch: issuer.fetch,
+      clock: issuer.clock,
+    });
+    expect(key_set.jwks_refetch_cooldown_ms).toBe(30_000);
+    await expect(key_set.find("shared-key")).resolves.toBeDefined();
+    expect(issuer.fetches).toBe(1);
+    // A flood of distinct unknown kids must not amplify into a JWKS request each.
+    for (let attempt = 0; attempt < 25; attempt += 1) {
+      await expect(key_set.find(`flood-${attempt}`)).rejects.toMatchObject({ code: "unauthenticated" });
+    }
+    expect(issuer.fetches).toBe(2);
+    issuer.now_ms = 30_000;
+    await expect(key_set.find("flood-later")).rejects.toMatchObject({ code: "unauthenticated" });
+    expect(issuer.fetches).toBe(3);
+  });
+
+  it("refuses an unbounded compensating refetch window", () => {
+    for (const cooldown of [0, 600_001, Number.NaN]) {
+      expect(() => create_signing_key_set({
+        ...SHARED_JWT_OPTIONS,
+        jwks_refetch_cooldown_ms: cooldown,
+        fetch: counting_fetch,
+      })).toThrow(TypeError);
+    }
+  });
+});
+
+/**
+ * Build a JWKS endpoint that can rotate to a second key, over a settable clock.
+ *
+ * @returns The settable clock, fetch counter, rotation control, and a signer.
+ */
+function rotating_issuer() {
+  const pairs = [generateKeyPairSync("rsa", { modulusLength: 2048 }), generateKeyPairSync("rsa", { modulusLength: 2048 })];
+  const published = new Set(["shared-key"]);
+  const index_of: Record<string, number> = { "shared-key": 0, "rotated-key": 1 };
+  const issuer = {
+    now_ms: 0,
+    fetches: 0,
+    clock: (): number => issuer.now_ms,
+    rotate: (): void => {
+      published.delete("shared-key");
+      published.add("rotated-key");
+    },
+    fetch: async (): Promise<Response> => {
+      issuer.fetches += 1;
+      const keys = [...published].map((kid) => ({
+        ...(pairs[index_of[kid]!]!.publicKey.export({ format: "jwk" }) as Record<string, unknown>),
+        kid,
+        alg: "RS256",
+        use: "sig",
+      }));
+      return new Response(JSON.stringify({ keys }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+    /** Sign a token for one published key id. */
+    sign_for: (kid: string): string => {
+      const header = base64url(JSON.stringify({ alg: "RS256", kid, typ: "JWT" }));
+      const payload = base64url(JSON.stringify({
+        iss: "https://issuer.example",
+        aud: "appointment-api",
+        sub: "operator-1",
+        sid: "session-1",
+        iat: 0,
+        exp: 9_999,
+        tenant_roles: { "42": ["owner"] },
+      }));
+      const signature = sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), pairs[index_of[kid]!]!.privateKey)
+        .toString("base64url");
+      return `${header}.${payload}.${signature}`;
+    },
+  };
+  return issuer;
+}
 
 /** JWKS requests counted across the assertions in this file. */
 let jwks_fetches = 0;

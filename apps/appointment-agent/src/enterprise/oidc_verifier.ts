@@ -22,6 +22,15 @@ export interface Rs256JwtOptions {
   audience: string;
   clock_skew_seconds?: number;
   jwks_cache_ms?: number;
+  /**
+   * Minimum spacing between compensating JWKS refetches.
+   *
+   * A rotated key arrives with an unknown `kid`, and a hard cache TTL would keep
+   * every token signed with it unverifiable until the TTL expires. One refetch
+   * per cooldown window makes a rotation usable within that window while capping
+   * how far a flood of arbitrary `kid` values can drive outbound JWKS requests.
+   */
+  jwks_refetch_cooldown_ms?: number;
   fetch?: typeof globalThis.fetch;
   clock?: () => number;
   /**
@@ -43,6 +52,10 @@ export interface Rs256JwtOptions {
 export interface SigningKeySet {
   /** Resolve a signing key by key id, refreshing the cache only on expiry. */
   find(kid: string): Promise<ReturnType<typeof createPublicKey>>;
+  /** Effective cache lifetime in milliseconds, exposed so a composition root's configured TTL is observable. */
+  readonly jwks_cache_ms: number;
+  /** Effective spacing between compensating refetches, in milliseconds. */
+  readonly jwks_refetch_cooldown_ms: number;
 }
 
 /** One cached signing key. */
@@ -54,6 +67,9 @@ interface JwksKey {
 const DEFAULT_ROLES_CLAIM = "tenant_roles";
 const DEFAULT_CLOCK_SKEW_SECONDS = 30;
 const DEFAULT_JWKS_CACHE_MS = 300_000;
+const DEFAULT_JWKS_REFETCH_COOLDOWN_MS = 30_000;
+const MIN_JWKS_REFETCH_COOLDOWN_MS = 1_000;
+const MAX_JWKS_REFETCH_COOLDOWN_MS = 600_000;
 const MAX_TOKEN_BYTES = 16 * 1024;
 const MAX_JWKS_BYTES = 256 * 1024;
 
@@ -284,23 +300,36 @@ export class OidcJwtVerifier implements OidcIdentityVerifier {
 
 /** Bounded HTTPS JWKS cache shared by one verifier instance. */
 class JwksKeySet implements SigningKeySet {
+  readonly jwks_cache_ms: number;
+  readonly jwks_refetch_cooldown_ms: number;
   private readonly jwks_url: string;
   private readonly fetch_implementation: typeof globalThis.fetch;
   private readonly clock: () => number;
-  private readonly cache_ms: number;
   private cached_keys: JwksKey[] = [];
   private cached_at_ms = 0;
+  /** When an unknown-kid refetch last ran; undefined until the first one does. */
+  private last_refetch_ms: number | undefined;
 
   constructor(options: Rs256JwtOptions) {
     this.jwks_url = require_https_url(options.jwks_url, "jwks_url");
     this.fetch_implementation = options.fetch ?? globalThis.fetch;
     if (typeof this.fetch_implementation !== "function") throw new TypeError("oidc-fetch-invalid");
     this.clock = options.clock ?? Date.now;
-    this.cache_ms = bounded_integer(options.jwks_cache_ms ?? DEFAULT_JWKS_CACHE_MS, "jwks_cache_ms", 86_400_000);
+    this.jwks_cache_ms = bounded_integer(options.jwks_cache_ms ?? DEFAULT_JWKS_CACHE_MS, "jwks_cache_ms", 86_400_000);
+    this.jwks_refetch_cooldown_ms = bounded_integer(
+      options.jwks_refetch_cooldown_ms ?? DEFAULT_JWKS_REFETCH_COOLDOWN_MS,
+      "jwks_refetch_cooldown_ms",
+      MAX_JWKS_REFETCH_COOLDOWN_MS,
+      MIN_JWKS_REFETCH_COOLDOWN_MS,
+    );
   }
 
   /**
-   * Resolve a signing key by key id, refreshing the cache only on expiry.
+   * Resolve a signing key by key id, refreshing the cache on expiry.
+   *
+   * An unknown `kid` costs at most one refetch per cooldown window, so a rotated
+   * key becomes usable without waiting out the whole cache TTL, while a caller
+   * sending arbitrary key ids cannot turn the cache into a request amplifier.
    *
    * @param kid - Key id from the JWS header.
    * @returns The matching RSA public key.
@@ -308,15 +337,24 @@ class JwksKeySet implements SigningKeySet {
    */
   async find(kid: string): Promise<ReturnType<typeof createPublicKey>> {
     const now_ms = this.clock();
-    if (this.cached_keys.length === 0 || now_ms - this.cached_at_ms >= this.cache_ms) {
-      this.cached_keys = await this.load_keys();
-      this.cached_at_ms = now_ms;
+    if (this.cached_keys.length === 0 || now_ms - this.cached_at_ms >= this.jwks_cache_ms) {
+      await this.refresh(now_ms);
     }
-    // Do not refresh on every unknown kid: an unauthenticated caller could
-    // otherwise turn arbitrary token headers into a JWKS request flood.
     const found = this.cached_keys.find((candidate) => candidate.kid === kid);
-    if (found === undefined) throw new AuthorizationError("unauthenticated");
-    return found.key;
+    if (found !== undefined) return found.key;
+    if (this.last_refetch_ms === undefined || now_ms - this.last_refetch_ms >= this.jwks_refetch_cooldown_ms) {
+      this.last_refetch_ms = now_ms;
+      await this.refresh(now_ms);
+      const refetched = this.cached_keys.find((candidate) => candidate.kid === kid);
+      if (refetched !== undefined) return refetched.key;
+    }
+    throw new AuthorizationError("unauthenticated");
+  }
+
+  /** Reload the key set and restart the cache lifetime. */
+  private async refresh(now_ms: number): Promise<void> {
+    this.cached_keys = await this.load_keys();
+    this.cached_at_ms = now_ms;
   }
 
   private async load_keys(): Promise<JwksKey[]> {
@@ -447,8 +485,8 @@ function required_text(value: string, field_name: string, maximum: number): stri
   return value;
 }
 
-function bounded_integer(value: number, field_name: string, maximum: number): number {
-  if (!Number.isSafeInteger(value) || value < 0 || value > maximum) throw new TypeError(`${field_name}-invalid`);
+function bounded_integer(value: number, field_name: string, maximum: number, minimum = 0): number {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw new TypeError(`${field_name}-invalid`);
   return value;
 }
 
