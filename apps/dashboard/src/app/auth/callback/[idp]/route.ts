@@ -7,8 +7,8 @@
  * so a callback that fails validation cannot leave a usable session behind.
  */
 
-import { OAuthFlowError } from "appointment-agent/dist/src/enterprise/oauth/index.js";
 import { finish_login, new_device_id, runtime } from "../../runtime";
+import { safe_message, status_for, workspace_redirect } from "../../route_helpers";
 
 /** Providers a callback may name; matches the login route's vocabulary. */
 const PROVIDERS: readonly ("supabase" | "google")[] = ["supabase", "google"];
@@ -36,7 +36,7 @@ export async function GET(
     return new Response(null, {
       status: 302,
       headers: {
-        Location: new URL(result.return_path, url.origin).toString(),
+        Location: workspace_redirect(parts, result.return_path),
         "Set-Cookie": result.cookie,
       },
     });
@@ -61,14 +61,4 @@ function read_callback_params(url: URL): { code?: string; state?: string; error?
     if (value !== null) params[field] = value;
   }
   return params;
-}
-
-/** Map a caught error to a sanitized status. */
-function status_for(error: unknown): number {
-  return error instanceof OAuthFlowError ? error.status() : 503;
-}
-
-/** Render a sanitized failure body without echoing a provider response. */
-function safe_message(error: unknown): string {
-  return error instanceof OAuthFlowError ? error.code : "staff-auth-unavailable";
 }

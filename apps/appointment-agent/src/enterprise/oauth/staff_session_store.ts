@@ -13,7 +13,6 @@
  */
 
 import {
-  hash_device,
   InMemorySessionRegistry,
   is_session_revoked,
   register_session,
@@ -231,12 +230,6 @@ export class InMemoryStaffSessionStore implements StaffSessionStore {
       .map((record) => ({ ...record }))
       .sort((left, right) => right.session.last_seen_at_iso.localeCompare(left.session.last_seen_at_iso));
   }
-}
-
-/** Hash a device identifier for the audit record, reusing the registry rule. */
-export function session_device_hash(device_id: string): string {
-  if (typeof device_id !== "string" || device_id.length === 0) throw new OAuthFlowError("oauth_configuration_invalid");
-  return hash_device(device_id);
 }
 
 /**

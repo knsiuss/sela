@@ -14,10 +14,11 @@
  * and revocation surface.
  *
  * Revocation is two-sided and both halves are required. `revoke_google_grant`
- * deletes the local row and asks Google to invalidate the grant; the Google call
- * is what stops a leaked copy of the ciphertext from being useful after a local
- * deletion, because deleting a row cannot un-mint a credential the provider
- * already issued.
+ * asks Google to invalidate the grant and only then deletes the local row,
+ * because the Google call is what stops a leaked copy of the ciphertext from
+ * being useful after a local deletion: deleting a row cannot un-mint a
+ * credential the provider already issued. A failed revoke therefore leaves the
+ * grant stored and resolvable so it can be retried.
  */
 
 import { randomUUID } from "node:crypto";
@@ -113,8 +114,8 @@ export class GoogleTokenGrantStore {
     const grant: GoogleTokenGrant = {
       grant_id: randomUUID(),
       tenant_id,
-      google_subject_id: require_opaque(input.google_subject_id, "google_subject_id"),
-      authorized_by_subject_id: require_opaque(input.authorized_by_subject_id, "authorized_by_subject_id"),
+      google_subject_id: require_opaque(input.google_subject_id),
+      authorized_by_subject_id: require_opaque(input.authorized_by_subject_id),
       scopes: require_scopes(input.scopes),
       encrypted_refresh_token: this.seal(input.refresh_token, tenant_id),
       created_at_iso: this.clock().toISOString(),
@@ -160,16 +161,20 @@ export class GoogleTokenGrantStore {
   }
 
   /**
-   * Revoke a grant on both sides: locally and at Google.
+   * Revoke a grant on both sides: at Google first, then locally.
    *
-   * The local row is removed even when the upstream call fails, because leaving
-   * a decryptable token behind after an operator asked for revocation is the
-   * worse outcome; the upstream failure is reported so the operator can retry it
-   * from the runbook.
+   * The order is the security-relevant part. Google is asked to invalidate the
+   * credential *before* the local row is destroyed, so a grant that could still
+   * be decrypted is also one that could still be revoked. A failing or absent
+   * upstream revoker leaves the row intact and resolvable, so an operator can
+   * retry the revoke from the runbook instead of having lost the only copy of the
+   * token needed to attempt it.
    *
    * @param tenant_id - Tenant whose grant is being withdrawn.
-   * @returns True when Google also invalidated the grant.
-   * @throws OAuthFlowError when the tenant has no stored grant.
+   * @returns True once Google has also invalidated the grant.
+   * @throws OAuthFlowError when the tenant has no stored grant, when no upstream
+   * revoker is wired, or when Google did not accept the revoke. In every failure
+   * case the grant is left stored and revocable.
    */
   async revoke_google_grant(tenant_id: string): Promise<boolean> {
     const tenant = require_tenant_id(tenant_id);
@@ -178,17 +183,23 @@ export class GoogleTokenGrantStore {
       this.audit("calendar_grant_revoked", "missing", tenant);
       throw new OAuthFlowError("oauth_membership_unresolved");
     }
+    // Checked before anything is decrypted or destroyed, so a store with no
+    // revoker refuses without touching the row it could not revoke.
+    const revoke_upstream = this.require_revoker();
     const refresh_token = this.open(grant, tenant);
+    try {
+      await revoke_upstream(refresh_token);
+    } catch {
+      // The credential is still live at Google and still decryptable here, so
+      // the row must survive: this is a retryable failure, not a completed
+      // revocation. Collapsing the upstream error keeps the token and any
+      // provider wording out of the failure a caller will log or render.
+      this.audit("calendar_grant_revoked", "failed", tenant);
+      throw new OAuthFlowError("oauth_token_exchange_failed");
+    }
     this.grants.delete(tenant);
     this.audit("calendar_grant_revoked", "revoked", tenant);
-    if (this.revoke_upstream !== undefined) {
-      await this.revoke_upstream(refresh_token);
-      return true;
-    }
-    // Without an injected revoker the store cannot revoke upstream, because it
-    // deliberately holds no client credentials. Report that rather than
-    // pretending the provider side was cleared.
-    throw new OAuthFlowError("oauth_configuration_invalid");
+    return true;
   }
 
   /**
@@ -215,6 +226,20 @@ export class GoogleTokenGrantStore {
     } catch {
       throw new OAuthFlowError("oauth_token_exchange_failed");
     }
+  }
+
+  /**
+   * Require the injected Google-side revoker before anything is destroyed.
+   *
+   * @returns The wired revoker.
+   * @throws OAuthFlowError when none is wired; the store holds no client
+   * credentials of its own, so it must not pretend the provider side was cleared.
+   */
+  private require_revoker(): (refresh_token: string) => Promise<void> {
+    if (this.revoke_upstream === undefined) {
+      throw new OAuthFlowError("oauth_configuration_invalid");
+    }
+    return this.revoke_upstream;
   }
 
   /** Decrypt one grant for its own tenant only. */
@@ -255,7 +280,7 @@ function require_tenant_id(value: string): string {
 }
 
 /** Require a bounded, control-character-free opaque identifier. */
-function require_opaque(value: string, field_name: string): string {
+function require_opaque(value: string): string {
   if (
     typeof value !== "string" ||
     value.length === 0 ||

@@ -20,7 +20,13 @@
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { OAuthFlowError } from "appointment-agent/dist/src/enterprise/oauth/index.js";
-import { authorize, authorize_privileged, type AuthenticatedPrincipal } from "appointment-agent/dist/src/enterprise/authorization.js";
+import {
+  authorize,
+  authorize_privileged,
+  permission_requires_mfa,
+  type AuthenticatedPrincipal,
+  type EnterprisePermission,
+} from "appointment-agent/dist/src/enterprise/authorization.js";
 
 /** Environment variable holding the receipt signing key. */
 export const ACTION_RECEIPT_KEY_ENV = "STAFF_ACTION_RECEIPT_KEY_BASE64";
@@ -77,26 +83,25 @@ export function parse_receipt_key(encoded_key: string | undefined): Buffer {
 /**
  * Decide whether the server authorizes one operator action.
  *
- * Privileged permissions go through `authorize_privileged`, so an unverified MFA
- * claim is a denial rather than a UI hint. A caller may not request the
- * non-privileged path for a privileged permission, because the permission mapping
- * is private to the enterprise contract and re-deriving it here would let a future
- * permission silently skip the MFA gate.
+ * The privileged classification is derived from the permission this action maps
+ * to, using the same predicate `authorize_privileged` applies. It is deliberately
+ * not a parameter: a caller that classified the action name instead could route a
+ * gated permission through the non-privileged path and skip `mfa_required` with
+ * no type error and no test failure.
  *
  * @param principal - Principal resolved from the verified session cookie.
  * @param request - The exact tuple to authorize.
- * @param privileged - Whether the action is privileged and needs MFA.
  * @returns Null when authorized, otherwise a sanitized domain code.
  */
 export function authorize_operator_action(
   principal: AuthenticatedPrincipal,
   request: ActionAuthorization,
-  privileged: boolean,
 ): string | null {
   try {
     const checked = require_request(request);
-    if (privileged) authorize_privileged(principal, checked.tenant_id, permission_for(checked.action));
-    else authorize(principal, checked.tenant_id, permission_for(checked.action));
+    const permission = permission_for(checked.action);
+    if (permission_requires_mfa(permission)) authorize_privileged(principal, checked.tenant_id, permission);
+    else authorize(principal, checked.tenant_id, permission);
     return null;
   } catch (error) {
     return error instanceof Error && error.name === "AuthorizationError" ? code_of(error.message) : "operator_action_preflight_failed";
@@ -277,7 +282,7 @@ function encode_payload(claims: ReceiptClaims): string {
 }
 
 /** Map an audited action to the permission the contract checks. */
-function permission_for(action: string): Parameters<typeof authorize>[2] {
+function permission_for(action: string): EnterprisePermission {
   switch (action) {
     case "resolve_conflict":
     case "release_hold":

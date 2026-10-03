@@ -20,6 +20,10 @@ import {
   require_redirect_uri,
   require_return_path,
 } from "../src/enterprise/oauth/redirect_policy.js";
+import {
+  build_google_consent_url,
+  GOOGLE_AUTHORIZATION_ENDPOINT,
+} from "../src/enterprise/oauth/google_authorize.js";
 
 const ALLOWED = ["https://staff.example.com/auth/callback"];
 
@@ -129,5 +133,43 @@ describe("return path validation", () => {
 
   it("refuses a backslash path that some browsers normalize to a separator", () => {
     expect(() => require_return_path("/actions\\..\\admin", ["/actions"])).toThrow();
+  });
+});
+
+describe("Google consent request construction", () => {
+  const BASE = {
+    client_id: "google-client-id",
+    redirect_uri: "https://staff.example.com/auth/callback",
+    state: "s".repeat(43),
+    code_challenge: "c".repeat(43),
+    nonce: "n".repeat(32),
+  };
+
+  it("requests every supplied scope, de-duplicated, without a client secret", () => {
+    const url = new URL(build_google_consent_url({
+      ...BASE,
+      scopes: ["openid", "email", "openid"],
+    }));
+    expect(url.origin + url.pathname).toBe(GOOGLE_AUTHORIZATION_ENDPOINT);
+    expect(url.searchParams.get("scope")).toBe("openid email");
+    expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(url.searchParams.has("client_secret")).toBe(false);
+  });
+
+  it("refuses an oversized scope list instead of truncating mid-scope", () => {
+    // Truncation would ask Google for a scope that does not exist, so the
+    // consent screen would differ from what the flow believes it requested.
+    const oversized = Array.from(
+      { length: 16 },
+      (_value, index) => `https://www.googleapis.com/auth/scope-${index}-${"x".repeat(30)}`,
+    );
+    expect(oversized.join(" ").length).toBeGreaterThan(1024);
+    expect(() => build_google_consent_url({ ...BASE, scopes: oversized })).toThrow(/oauth_configuration_invalid/);
+    expect(() => build_google_consent_url({ ...BASE, scopes: ["openid", "email"] })).not.toThrow();
+  });
+
+  it("refuses an empty or malformed scope list", () => {
+    expect(() => build_google_consent_url({ ...BASE, scopes: [] })).toThrow(/oauth_configuration_invalid/);
+    expect(() => build_google_consent_url({ ...BASE, scopes: ["not a scope"] })).toThrow(/oauth_configuration_invalid/);
   });
 });

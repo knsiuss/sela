@@ -48,7 +48,6 @@ export type { IdTokenVerifierOptions, VerifiedStaffIdentity } from "./id_token_v
 export {
   InMemoryStaffDirectory,
   STAFF_DIRECTORY_ENV,
-  assert_principal_tenant,
   build_staff_principal,
   parse_staff_directory,
 } from "./staff_directory.js";
@@ -66,7 +65,7 @@ export {
   serialize_session_cookie,
 } from "./session_cookie.js";
 export type { IssuedSessionSecret, SessionCookieConfig, SessionCookiePolicy } from "./session_cookie.js";
-export { InMemoryStaffSessionStore, session_device_hash, session_principal } from "./staff_session_store.js";
+export { InMemoryStaffSessionStore, session_principal } from "./staff_session_store.js";
 export type {
   CreateStaffSessionInput,
   EstablishedStaffSession,
@@ -76,10 +75,13 @@ export type {
 export {
   REDIRECT_ALLOW_LIST_ENV,
   DEFAULT_CALENDAR_SCOPES,
+  is_loopback_public_base_url,
   parse_staff_auth_config,
   require_provider,
 } from "./staff_auth_config.js";
 export type { IdProviderConfig, StaffAuthConfig } from "./staff_auth_config.js";
+export { google_grant_revoker } from "./google_revocation.js";
+export type { GoogleRevokerOptions } from "./google_revocation.js";
 export { begin_authorization, complete_authorization } from "./oauth_flow.js";
 export type {
   AuthorizationRedirect,

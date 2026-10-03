@@ -6,9 +6,8 @@
  * mapping can only ever be created by a member of that tenant.
  */
 
-import { OAuthFlowError } from "appointment-agent/dist/src/enterprise/oauth/index.js";
 import { finish_calendar_consent, principal_from_cookie, runtime } from "../../runtime";
-import { read_session_cookie } from "../route";
+import { read_session_cookie, safe_message, status_for, workspace_redirect } from "../../route_helpers";
 
 /**
  * Store the granted refresh token for the bound tenant.
@@ -24,7 +23,7 @@ export async function GET(request: Request): Promise<Response> {
     const result = await finish_calendar_consent(parts, principal, read_callback_params(url));
     return new Response(null, {
       status: 302,
-      headers: { Location: new URL(`/actions?calendar=${encodeURIComponent(result.tenant_id)}`, url.origin).toString() },
+      headers: { Location: workspace_redirect(parts, `/actions?calendar=${encodeURIComponent(result.tenant_id)}`) },
     });
   } catch (error) {
     return new Response(safe_message(error), { status: status_for(error) });
@@ -44,14 +43,4 @@ function read_callback_params(url: URL): { code?: string; state?: string; error?
     if (value !== null) params[field] = value;
   }
   return params;
-}
-
-/** Map a caught error to a sanitized status. */
-function status_for(error: unknown): number {
-  return error instanceof OAuthFlowError ? error.status() : 503;
-}
-
-/** Render a sanitized failure body without echoing a provider response. */
-function safe_message(error: unknown): string {
-  return error instanceof OAuthFlowError ? error.code : "staff-auth-unavailable";
 }

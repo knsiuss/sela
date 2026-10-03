@@ -16,6 +16,7 @@ import {
   complete_authorization,
   google_code_exchanger,
   issue_session_secret,
+  parse_staff_auth_config,
   parse_staff_directory,
   require_return_path,
   resolve_session_cookie_policy,
@@ -339,6 +340,30 @@ describe("MFA evidence is derived, never assumed", () => {
     expect(has_verified_mfa({ amr: "otp" })).toBe(false);
   });
 
+  it("refuses a bare boolean MFA claim, which no supported issuer emits", () => {
+    // `has_mfa` is not an OIDC, Supabase Auth, or Google claim. Honouring it would
+    // let an issuer that can place a boolean on a token unlock outbound:replay.
+    expect(has_verified_mfa({ has_mfa: true })).toBe(false);
+    expect(has_verified_mfa({ has_mfa: true, amr: ["pwd"] })).toBe(false);
+    expect(has_verified_mfa({ has_mfa: true, aal: "aal1" })).toBe(false);
+    // The recognised forms still open the gate, so this is a narrowing and not a
+    // blanket refusal.
+    expect(has_verified_mfa({ has_mfa: true, aal: "aal2" })).toBe(true);
+  });
+
+  it("keeps the privileged gate closed for a login whose only MFA claim is a boolean", async () => {
+    const parts = harness({ extra_claims: { has_mfa: true } });
+    const completed = await run_login(parts);
+    const principal = await build_staff_principal({
+      subject_id: completed.identity.subject_id,
+      issuer: completed.identity.issuer,
+      has_mfa: completed.identity.has_mfa,
+      issued_at_iso: new Date().toISOString(),
+    }, parts.directory);
+    expect(completed.identity.has_mfa).toBe(false);
+    expect(() => authorize_privileged(principal, FAKE_TENANT_ID, "outbound:replay")).toThrow(/mfa-required/);
+  });
+
   it("keeps the privileged gate closed for a Supabase login without aal2", async () => {
     const parts = harness({ supabase_amr: true, mfa: false });
     const completed = await run_login(parts);
@@ -372,6 +397,16 @@ describe("configuration fails closed", () => {
     expect(() => require_return_path("/admin", ["/actions"])).toThrow();
   });
 
+  it("refuses a directory issuer on a non-https scheme even on a loopback host", () => {
+    // A loopback hostname must not wave through an arbitrary scheme: no browser
+    // redirect or provider could ever have produced `ftp://localhost/x`.
+    for (const issuer of ["ftp://localhost/x", "foo://localhost/x", "file://127.0.0.1/x", "ws://localhost/x"]) {
+      expect(() => parse_staff_directory(directory_json(issuer))).toThrow(/oauth_configuration_invalid/);
+    }
+    expect(() => parse_staff_directory(directory_json("http://localhost:3000/x"))).not.toThrow();
+    expect(() => parse_staff_directory(directory_json(FAKE_ISSUER))).not.toThrow();
+  });
+
   it("keeps the session secret out of the record it is derived from", () => {
     const issued = issue_session_secret();
     expect(issued.secret_hash).not.toBe(issued.secret);
@@ -389,3 +424,19 @@ describe("configuration fails closed", () => {
     });
   });
 });
+
+/** Build a one-entry directory naming the supplied issuer. */
+function directory_json(issuer: string): string {
+  return JSON.stringify({
+    entries: [{
+      issuer,
+      subject_id: FAKE_SUBJECT,
+      org_id: "acme",
+      tenant_id: FAKE_TENANT_ID,
+      roles: ["owner"],
+      status: "active",
+      invited_at_iso: "2026-01-01T00:00:00.000Z",
+      updated_at_iso: "2026-01-02T00:00:00.000Z",
+    }],
+  });
+}

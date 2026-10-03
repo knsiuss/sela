@@ -99,6 +99,27 @@ export function authorize(
   if (!allowed) throw new AuthorizationError("forbidden");
 }
 
+/** Permissions that additionally require a verified second factor. */
+const MFA_GATED_PERMISSIONS: ReadonlySet<EnterprisePermission> = new Set<EnterprisePermission>([
+  "outbound:replay",
+  "appointments:cancel",
+  "tenant:manage",
+]);
+
+/**
+ * Report whether a permission is second-factor gated.
+ *
+ * This is the single definition of the gate, so a caller cannot route a
+ * permission through the non-privileged path by classifying the *action* rather
+ * than the permission it maps to.
+ *
+ * @param permission - Permission the authorization contract would check.
+ * @returns True when `authorize_privileged` demands verified MFA for it.
+ */
+export function permission_requires_mfa(permission: EnterprisePermission): boolean {
+  return MFA_GATED_PERMISSIONS.has(permission);
+}
+
 /** Require MFA for replay, cancellation, and tenant-management actions. */
 export function authorize_privileged(
   principal: AuthenticatedPrincipal,
@@ -106,8 +127,8 @@ export function authorize_privileged(
   permission: EnterprisePermission,
 ): void {
   authorize(principal, tenant_id, permission);
-  if (permission === "outbound:replay" || permission === "appointments:cancel" || permission === "tenant:manage") {
-    if (!principal.has_mfa) throw new AuthorizationError("mfa_required");
+  if (permission_requires_mfa(permission) && !principal.has_mfa) {
+    throw new AuthorizationError("mfa_required");
   }
 }
 

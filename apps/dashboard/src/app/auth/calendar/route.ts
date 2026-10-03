@@ -6,8 +6,8 @@
  * cannot bind their own Google account to someone else's tenant.
  */
 
-import { OAuthFlowError } from "appointment-agent/dist/src/enterprise/oauth/index.js";
 import { principal_from_cookie, runtime, start_calendar_consent } from "../runtime";
+import { read_session_cookie, safe_message, status_for } from "../route_helpers";
 
 /**
  * Redirect to Google's consent screen for the requested tenant.
@@ -26,29 +26,4 @@ export async function GET(request: Request): Promise<Response> {
   } catch (error) {
     return new Response(safe_message(error), { status: status_for(error) });
   }
-}
-
-/**
- * Extract the session cookie from a `Cookie` header.
- *
- * @param header - Raw `Cookie` request header.
- * @returns The cookie value, or undefined when absent.
- */
-export function read_session_cookie(header: string | null): string | undefined {
-  if (header === null) return undefined;
-  for (const part of header.split(";")) {
-    const [name, ...rest] = part.trim().split("=");
-    if (name === "__Host-sel_session" || name === "sel_session") return rest.join("=");
-  }
-  return undefined;
-}
-
-/** Map a caught error to a sanitized status. */
-function status_for(error: unknown): number {
-  return error instanceof OAuthFlowError ? error.status() : 503;
-}
-
-/** Render a sanitized failure body without echoing a provider response. */
-function safe_message(error: unknown): string {
-  return error instanceof OAuthFlowError ? error.code : "staff-auth-unavailable";
 }

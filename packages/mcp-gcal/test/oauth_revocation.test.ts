@@ -26,29 +26,33 @@ describe("revoke_google_token", () => {
       expect(new URLSearchParams(String(init?.body ?? "")).get("token")).toBe(TOKEN);
       return new Response("", { status: 200 });
     });
-    await expect(revoke_google_token({ token: TOKEN, client_id: "cid", client_secret: "s", fetch: fetch_mock }))
-      .resolves.toBeUndefined();
+    await expect(revoke_google_token({ token: TOKEN, fetch: fetch_mock })).resolves.toBeUndefined();
     expect(fetch_mock.mock.calls[0]?.[0]).toBe(GOOGLE_REVOCATION_ENDPOINT);
   });
 
-  it("reports an upstream failure without echoing the token or secret", async () => {
+  it("authenticates with the token alone, so no client secret can reach the wire", async () => {
+    const fetch_mock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => new Response("", { status: 200 }));
+    await revoke_google_token({ token: TOKEN, fetch: fetch_mock });
+    const sent = fetch_mock.mock.calls[0];
+    const body = new URLSearchParams(String(sent?.[1]?.body ?? ""));
+    expect([...body.keys()]).toEqual(["token"]);
+    expect(JSON.stringify(sent?.[1])).not.toContain("secret");
+  });
+
+  it("reports an upstream failure without echoing the token", async () => {
     const attempt = revoke_google_token({
       token: TOKEN,
-      client_id: "cid",
-      client_secret: "super-secret-value",
       fetch: vi.fn(async () => new Response("", { status: 400 })),
     });
     const message = await attempt.catch((error: Error) => error.message);
     expect(message).not.toContain(TOKEN);
-    expect(message).not.toContain("super-secret-value");
     expect(message).toContain("status 400");
   });
 
   it("refuses a malformed token before making a request", async () => {
     const fetch_mock = vi.fn(async () => new Response("", { status: 200 }));
     for (const bad of ["", "not a token", "tok\nen"]) {
-      await expect(revoke_google_token({ token: bad, client_id: "cid", client_secret: "s", fetch: fetch_mock }))
-        .rejects.toThrow(GoogleOAuthError);
+      await expect(revoke_google_token({ token: bad, fetch: fetch_mock })).rejects.toThrow(GoogleOAuthError);
     }
     expect(fetch_mock).not.toHaveBeenCalled();
   });
@@ -56,8 +60,6 @@ describe("revoke_google_token", () => {
   it("reports a transport failure distinctly from an upstream rejection", async () => {
     const failed = revoke_google_token({
       token: TOKEN,
-      client_id: "cid",
-      client_secret: "s",
       fetch: vi.fn(async () => { throw new Error("network down"); }),
     });
     await expect(failed).rejects.toMatchObject({ code: "request_failed" });

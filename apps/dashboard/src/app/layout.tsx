@@ -58,7 +58,7 @@ export default async function RootLayout(props: RootLayoutProps): Promise<ReactE
       </html>
     );
   }
-  const scope = load_workspace_scope(principal);
+  const scope = await load_workspace_scope();
   return (
     <html lang="en">
       <body>

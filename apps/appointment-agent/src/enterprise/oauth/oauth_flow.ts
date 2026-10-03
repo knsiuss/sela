@@ -42,7 +42,6 @@ import type { IdTokenVerifierOptions } from "./id_token_verifier.js";
 
 const NONCE_ENTROPY_BYTES = 24;
 const MAX_CODE_CHARS = 4096;
-const MAX_RETURN_PATHS = 16;
 
 /** One authorize redirect, ready to send as a 302. */
 export interface AuthorizationRedirect {
@@ -314,12 +313,4 @@ function require_https_issuer(value: string): string {
     throw new OAuthFlowError("oauth_configuration_invalid");
   }
   return parsed.toString().replace(/\/$/u, "");
-}
-
-/** Validate a return-path allow-list supplied by configuration. */
-export function require_return_path_allow_list(value: readonly string[]): readonly string[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_RETURN_PATHS) {
-    throw new OAuthFlowError("oauth_configuration_invalid");
-  }
-  return value;
 }

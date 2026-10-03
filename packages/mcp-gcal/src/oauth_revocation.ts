@@ -6,6 +6,10 @@
  * invalidates the access tokens derived from it, which is what makes a Google-side
  * revoke the durable control after a suspected leak (runbook RB-06).
  *
+ * The revocation request authenticates with the token alone: Google's revocation
+ * endpoint takes a single `token` form field, and a client secret that was never
+ * placed on the wire would only widen this module's secret surface.
+ *
  * The authorization-code *request* and *exchange* deliberately live in
  * `appointment-agent/.../oauth`, next to the login flow that drives them, so the
  * staff-auth modules stay free of a provider-package import.
@@ -23,8 +27,6 @@ const TOKEN_PATTERN = /^[A-Za-z0-9._~+/=-]{1,4096}$/;
 /** Input for revoking one access or refresh token at Google. */
 export interface GoogleRevocationInput {
   token: string;
-  client_id: string;
-  client_secret: string;
   fetch?: OAuthFetch;
   request_timeout_ms?: number;
 }
@@ -32,10 +34,10 @@ export interface GoogleRevocationInput {
 /**
  * Revoke an access or refresh token at Google.
  *
- * @param input - Token to revoke plus client credentials.
+ * @param input - Token to revoke, plus optional fetch and timeout.
  * @returns Nothing once Google has accepted the revocation.
  * @throws GoogleOAuthError for an invalid token, a transport failure, or an
- * upstream rejection. The message never contains the token or the secret.
+ * upstream rejection. The message never contains the token.
  */
 export async function revoke_google_token(input: GoogleRevocationInput): Promise<void> {
   const token = require_token(input?.token);

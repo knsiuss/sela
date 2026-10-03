@@ -59,8 +59,7 @@ export function build_test_snapshot(role: EnterpriseRole = "operator"): Workspac
  */
 export function stub_authorizer(principal: AuthenticatedPrincipal): ActionAuthorizer {
   return async (request) => {
-    const privileged = request.action === "replay_outbound";
-    const code = authorize_operator_action(principal, request, privileged);
+    const code = authorize_operator_action(principal, request);
     return { code, receipt: code === null ? "fixture-receipt" : null };
   };
 }

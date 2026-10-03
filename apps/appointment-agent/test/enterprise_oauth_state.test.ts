@@ -13,6 +13,7 @@ import {
   InMemoryOAuthStateStore,
   MAX_OAUTH_STATE_TTL_SECONDS,
 } from "../src/enterprise/oauth/oauth_state.js";
+import { complete_authorization } from "../src/enterprise/oauth/oauth_flow.js";
 import { OAuthFlowError } from "../src/enterprise/oauth/oauth_error.js";
 
 const START_MS = Date.parse("2026-09-25T00:00:00.000Z");
@@ -33,6 +34,48 @@ function issue_input(overrides: Record<string, unknown> = {}): Parameters<InMemo
     nonce: NONCE,
     ...overrides,
   } as Parameters<InMemoryOAuthStateStore["issue"]>[0];
+}
+
+/** An exchanger that must never be reached by a binding refusal. */
+const UNREACHABLE_EXCHANGER = {
+  exchange: () => {
+    throw new Error("code-exchanger-reached-after-binding-refusal");
+  },
+};
+
+/**
+ * Drive a callback at `complete_authorization` for one state value.
+ *
+ * @param store - Store holding the issued state.
+ * @param state - Raw state value the callback presents.
+ * @param expected_purpose - Purpose the callback route expects.
+ * @param expected_idp - Provider the callback route expects.
+ * @returns The completed authorization, which a refusal never resolves to.
+ */
+function finish(
+  store: InMemoryOAuthStateStore,
+  state: string,
+  expected_purpose: "staff_login" | "calendar_consent",
+  expected_idp: "supabase" | "google" = "supabase",
+): Promise<unknown> {
+  return complete_authorization(
+    store,
+    UNREACHABLE_EXCHANGER,
+    {
+      issuer_url: "https://idp.test.invalid/auth/v1",
+      jwks_url: "https://idp.test.invalid/auth/v1/jwks",
+      staff_audience: "fake-client-id",
+    },
+    {
+      idp: expected_idp,
+      expected_purpose,
+      client_id: "fake-client-id",
+      client_secret: "fake-client-secret",
+      redirect_uri: "https://staff.example.com/auth/callback",
+      params: { code: "unused-authorization-code", state },
+      allowed_return_paths: ["/actions"],
+    },
+  );
 }
 
 describe("OAuth state abuse resistance", () => {
@@ -104,6 +147,29 @@ describe("OAuth state abuse resistance", () => {
     expect(login_record.tenant_id).toBeNull();
     expect(consent_record.purpose).toBe("calendar_consent");
     expect(consent_record.tenant_id).toBe("1001");
+  });
+
+  it("refuses a login state spent on the consent callback and the reverse", async () => {
+    // A login callback and a consent callback are different routes with
+    // different tenant consequences, so a state issued for one must not be
+    // redeemable at the other. The exchanger is never reached: the refusal has
+    // to happen before any credential is exchanged.
+    const store = store_at(() => START_MS);
+    const login = await store.issue(issue_input({ purpose: "staff_login", tenant_id: null }));
+    await expect(finish(store, login.state, "calendar_consent"))
+      .rejects.toMatchObject({ code: "oauth_state_unknown" });
+
+    const second = store_at(() => START_MS);
+    const consent = await second.issue(issue_input({ purpose: "calendar_consent", tenant_id: "1001" }));
+    await expect(finish(second, consent.state, "staff_login"))
+      .rejects.toMatchObject({ code: "oauth_state_unknown" });
+  });
+
+  it("refuses a state issued for another provider", async () => {
+    const store = store_at(() => START_MS);
+    const issued = await store.issue(issue_input({ idp: "google" }));
+    const attempt = finish(store, issued.state, "staff_login", "supabase");
+    await expect(attempt).rejects.toMatchObject({ code: "oauth_idp_unknown" });
   });
 
   it("refuses a tenant id that is not a positive integer", async () => {

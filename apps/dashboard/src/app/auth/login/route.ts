@@ -6,8 +6,8 @@
  * this route cannot be used as an open redirector.
  */
 
-import { OAuthFlowError } from "appointment-agent/dist/src/enterprise/oauth/index.js";
 import { DEFAULT_RETURN_PATHS, runtime, start_login } from "../runtime";
+import { safe_message, status_for } from "../route_helpers";
 
 /** Providers a login request may name. */
 const PROVIDERS: readonly ("supabase" | "google")[] = ["supabase", "google"];
@@ -30,14 +30,4 @@ export async function GET(request: Request): Promise<Response> {
   } catch (error) {
     return new Response(safe_message(error), { status: status_for(error) });
   }
-}
-
-/** Map a caught error to a sanitized status. */
-function status_for(error: unknown): number {
-  return error instanceof OAuthFlowError ? error.status() : 503;
-}
-
-/** Render a sanitized failure body without echoing a provider response. */
-function safe_message(error: unknown): string {
-  return error instanceof OAuthFlowError ? error.code : "staff-auth-unavailable";
 }

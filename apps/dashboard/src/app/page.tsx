@@ -1,7 +1,6 @@
 import type { ReactElement } from "react";
 import { OverviewView } from "@/components/OverviewView";
 import { load_workspace_scope } from "./local_scope";
-import { require_session_principal } from "./auth/session";
 
 /**
  * Route wrapper for the overview.
@@ -14,6 +13,6 @@ import { require_session_principal } from "./auth/session";
  * @returns The overview page.
  */
 export default async function OverviewPage(): Promise<ReactElement> {
-  const scope = load_workspace_scope(await require_session_principal());
+  const scope = await load_workspace_scope();
   return <OverviewView scope={scope} />;
 }

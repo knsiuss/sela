@@ -2,7 +2,6 @@ import type { ReactElement } from "react";
 import { OperatorActionPanel } from "@/components/OperatorActionPanel";
 import { PageHeader } from "@/components/PageHeader";
 import { load_workspace_scope } from "../local_scope";
-import { require_session_principal } from "../auth/session";
 
 /**
  * Render the audited operator action surface.
@@ -10,7 +9,7 @@ import { require_session_principal } from "../auth/session";
  * @returns The actions page.
  */
 export default async function ActionsPage(): Promise<ReactElement> {
-  const { snapshot } = load_workspace_scope(await require_session_principal());
+  const { snapshot } = await load_workspace_scope();
   return (
     <>
       <PageHeader

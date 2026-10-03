@@ -46,24 +46,24 @@ describe("action receipt signing key", () => {
 describe("server-side authorization", () => {
   it("allows an action the session role holds", () => {
     const principal = build_fixture_principal(TENANT_ID, "operator");
-    expect(authorize_operator_action(principal, REQUEST, false)).toBeNull();
+    expect(authorize_operator_action(principal, REQUEST)).toBeNull();
   });
 
   it("refuses a tenant the principal has no membership in", () => {
     const principal = build_fixture_principal(TENANT_ID, "owner");
-    expect(authorize_operator_action(principal, { ...REQUEST, tenant_id: "2002" }, false)).toBe("forbidden");
+    expect(authorize_operator_action(principal, { ...REQUEST, tenant_id: "2002" })).toBe("forbidden");
   });
 
   it("refuses a privileged action when MFA is unverified", () => {
     const principal = build_fixture_principal(TENANT_ID, "owner", false);
     const privileged = { ...REQUEST, action: "replay_outbound" };
-    expect(authorize_operator_action(principal, privileged, true)).toBe("mfa_required");
+    expect(authorize_operator_action(principal, privileged)).toBe("mfa_required");
   });
 
   it("allows a privileged action only with verified MFA", () => {
     const principal = build_fixture_principal(TENANT_ID, "owner", true);
     const privileged = { ...REQUEST, action: "replay_outbound" };
-    expect(authorize_operator_action(principal, privileged, true)).toBeNull();
+    expect(authorize_operator_action(principal, privileged)).toBeNull();
   });
 
   it("refuses a malformed tenant, action, target, or reason instead of authorizing", () => {
@@ -76,7 +76,7 @@ describe("server-side authorization", () => {
     ]) {
       // The boundary reports a denial code rather than throwing, so a caller
       // cannot distinguish "refused" from "crashed" and neither can be a success.
-      expect(authorize_operator_action(principal, bad, false)).not.toBeNull();
+      expect(authorize_operator_action(principal, bad)).not.toBeNull();
     }
   });
 

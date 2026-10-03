@@ -2,7 +2,6 @@ import type { ReactElement } from "react";
 import { AuditTimeline } from "@/components/AuditTimeline";
 import { PageHeader } from "@/components/PageHeader";
 import { load_workspace_scope } from "../local_scope";
-import { require_session_principal } from "../auth/session";
 
 /**
  * Render the redacted operator audit timeline.
@@ -10,7 +9,7 @@ import { require_session_principal } from "../auth/session";
  * @returns The audit page.
  */
 export default async function AuditPage(): Promise<ReactElement> {
-  const { snapshot } = load_workspace_scope(await require_session_principal());
+  const { snapshot } = await load_workspace_scope();
   return (
     <>
       <PageHeader

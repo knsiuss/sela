@@ -9,12 +9,16 @@
  *   cannot widen its own scope by editing a query string.
  * - MFA is whatever the identity provider asserted. Unverified MFA is `false`,
  *   so privileged actions fail closed.
- * - With no IdP configured, or no session, `resolve_workspace_scope` throws. The
+ * - With no IdP configured, or no session, `load_workspace_scope` throws. The
  *   layout turns that into a refusal, so local development never falls back to an
  *   unauthenticated dashboard.
  *
  * The reference time is still read exactly once per request and shared through
- * React's `cache`, so the shell snapshot and every page describe one instant.
+ * React's `cache`. `load_workspace_scope` takes no arguments on purpose:
+ * `cache` compares its arguments, and every caller used to pass a freshly built
+ * principal object, so the comparison never matched and the "one instant per
+ * request" the comment claims did not hold. Resolving the session inside a
+ * zero-argument wrapper makes the cache key constant and therefore a hit.
  */
 
 import { cache } from "react";
@@ -25,6 +29,7 @@ import type { PrincipalClaims } from "@/domain/principal_claims";
 import { to_wire_principal } from "@/domain/principal_claims";
 import type { WorkspaceSnapshot } from "@/domain/workspace_state";
 import { create_workspace_snapshot } from "@/domain/workspace_state";
+import { require_session_principal } from "./auth/session";
 
 /** Everything the server components need for one authenticated request. */
 export interface WorkspaceScope {
@@ -64,14 +69,16 @@ export function resolve_workspace_scope(now_ms: number, principal: Authenticated
  *
  * React's `cache` is request-scoped under the App Router, so the root layout and
  * every page in the same request receive the same object and therefore the same
- * `Date.now()` reading.
+ * `Date.now()` reading. The signature is empty on purpose: an argument would
+ * become the cache key, and the principal every caller can supply is a fresh
+ * object, so the key would never match.
  *
- * @param principal - Principal resolved from the verified session cookie.
  * @returns The request's workspace scope.
- * @throws OAuthFlowError when the principal has no tenant membership.
+ * @throws OAuthFlowError when the request has no usable session, or when the
+ * principal has no tenant membership.
  */
-export const load_workspace_scope = cache((principal: AuthenticatedPrincipal): WorkspaceScope => {
-  return resolve_workspace_scope(Date.now(), principal);
+export const load_workspace_scope = cache(async (): Promise<WorkspaceScope> => {
+  return resolve_workspace_scope(Date.now(), await require_session_principal());
 });
 
 /**

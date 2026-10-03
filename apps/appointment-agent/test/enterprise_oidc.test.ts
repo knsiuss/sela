@@ -1,6 +1,12 @@
 import { generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { OidcJwtVerifier, oidc_verifier_from_env, supabase_oidc_options_from_env } from "../src/enterprise/oidc_verifier.js";
+import {
+  create_signing_key_set,
+  OidcJwtVerifier,
+  oidc_verifier_from_env,
+  supabase_oidc_options_from_env,
+  verify_rs256_jwt,
+} from "../src/enterprise/oidc_verifier.js";
 
 const NOW_MS = Date.parse("2026-09-25T00:00:00.000Z");
 
@@ -137,7 +143,86 @@ describe("OIDC verification boundaries", () => {
       OIDC_ISSUER_URL: "https://issuer.example",
     })).toThrow("oidc-environment-required");
   });
+
+  it("treats a bare has_mfa boolean as unverified on the operator bearer path", async () => {
+    const verifier = bearer_verifier();
+    // A verified signature is not MFA evidence: the claim is not one any
+    // supported issuer emits, so honouring it would self-assert a second factor
+    // and unlock outbound:replay from the operator API.
+    await expect(verifier.verify(signed_token({ has_mfa: true }))).resolves.toMatchObject({ has_mfa: false });
+    await expect(verifier.verify(signed_token({ has_mfa: true, aal: "aal2" })))
+      .resolves.toMatchObject({ has_mfa: true });
+  });
+
+  it("reuses one JWKS fetch across verifications when the key set is shared", async () => {
+    jwks_fetches = 0;
+    const key_set = create_signing_key_set({
+      ...SHARED_JWT_OPTIONS,
+      fetch: counting_fetch,
+      clock: () => NOW_MS,
+    });
+    const options = { ...SHARED_JWT_OPTIONS, key_set, clock: () => NOW_MS };
+    await verify_rs256_jwt(signed_token(), options);
+    await verify_rs256_jwt(signed_token(), options);
+    // A key set built per call would refetch, which is exactly the outbound
+    // request on every staff login that the shared set removes.
+    expect(jwks_fetches).toBe(1);
+  });
+
+  it("fetches the JWKS once per verification when no key set is supplied", async () => {
+    jwks_fetches = 0;
+    const options = { ...SHARED_JWT_OPTIONS, fetch: counting_fetch, clock: () => NOW_MS };
+    await verify_rs256_jwt(signed_token(), options);
+    await verify_rs256_jwt(signed_token(), options);
+    expect(jwks_fetches).toBe(2);
+  });
 });
+
+/** JWKS requests counted across the assertions in this file. */
+let jwks_fetches = 0;
+
+/** Signing key shared by the generated tokens in this file. */
+const keys = generateKeyPairSync("rsa", { modulusLength: 2048 });
+
+const counting_fetch = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+  const url = new URL(input instanceof Request ? input.url : String(input));
+  if (!url.pathname.endsWith("/jwks")) throw new Error("unexpected-endpoint");
+  jwks_fetches += 1;
+  const jwk = keys.publicKey.export({ format: "jwk" }) as Record<string, unknown>;
+  return new Response(JSON.stringify({ keys: [{ ...jwk, kid: "shared-key", alg: "RS256", use: "sig" }] }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+});
+
+/** Trust settings shared by the generated tokens in this file. */
+const SHARED_JWT_OPTIONS = {
+  issuer_url: "https://issuer.example",
+  jwks_url: "https://issuer.example/jwks",
+  audience: "appointment-api",
+};
+
+/** Build a bearer verifier over the shared key pair and counting fetch. */
+function bearer_verifier(): OidcJwtVerifier {
+  return new OidcJwtVerifier({ ...SHARED_JWT_OPTIONS, fetch: counting_fetch, clock: () => NOW_MS });
+}
+
+/** Sign a compact JWS carrying the shared key id and the given extra claims. */
+function signed_token(claims: Record<string, unknown> = {}): string {
+  const header = base64url(JSON.stringify({ alg: "RS256", kid: "shared-key", typ: "JWT" }));
+  const payload = base64url(JSON.stringify({
+    iss: "https://issuer.example",
+    aud: "appointment-api",
+    sub: "operator-1",
+    sid: "session-1",
+    iat: Math.floor(NOW_MS / 1_000),
+    exp: Math.floor(NOW_MS / 1_000) + 300,
+    tenant_roles: { "42": ["owner"] },
+    ...claims,
+  }));
+  const signature = sign("RSA-SHA256", Buffer.from(`${header}.${payload}`), keys.privateKey).toString("base64url");
+  return `${header}.${payload}.${signature}`;
+}
 
 function base64url(value: string): string {
   return Buffer.from(value).toString("base64url");

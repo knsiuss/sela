@@ -73,7 +73,7 @@ export function supabase_code_exchanger(
   options: { auth_method?: TokenEndpointAuthMethod; fetch?: TokenFetch; timeout_ms?: number } = {},
 ): AuthorizationCodeExchanger {
   return form_exchanger(
-    `${require_https_url(issuer_url, "supabase issuer")}/oauth/token`,
+    `${require_https_url(issuer_url)}/oauth/token`,
     options.auth_method ?? "client_secret_basic",
     options.fetch,
     options.timeout_ms ?? DEFAULT_TIMEOUT_MS,
@@ -108,13 +108,13 @@ function form_exchanger(
   if (typeof do_fetch !== "function") throw new OAuthFlowError("oauth_configuration_invalid");
   return {
     async exchange(input: CodeExchangeInput): Promise<AuthorizationCodeTokens> {
-      const client_id = require_field(input?.client_id, "client_id");
-      const client_secret = require_field(input?.client_secret, "client_secret");
+      const client_id = require_field(input?.client_id);
+      const client_secret = require_field(input?.client_secret);
       const body = new URLSearchParams({
         grant_type: "authorization_code",
-        code: require_field(input?.code, "code"),
+        code: require_field(input?.code),
         code_verifier: require_verifier(input?.code_verifier),
-        redirect_uri: require_field(input?.redirect_uri, "redirect_uri"),
+        redirect_uri: require_field(input?.redirect_uri),
       });
       if (auth_method === "client_secret_post") {
         body.set("client_id", client_id);
@@ -201,7 +201,7 @@ async function read_tokens(response: Response): Promise<AuthorizationCodeTokens>
 }
 
 /** Require an https URL with no credentials, query, or fragment. */
-function require_https_url(value: string, field_name: string): string {
+function require_https_url(value: string): string {
   let parsed: URL;
   try {
     parsed = new URL(value);
@@ -217,16 +217,14 @@ function require_https_url(value: string, field_name: string): string {
   ) {
     throw new OAuthFlowError("oauth_configuration_invalid");
   }
-  void field_name;
   return parsed.toString().replace(/\/$/u, "");
 }
 
 /** Require a bounded, trimmed form field. */
-function require_field(value: string, field_name: string): string {
+function require_field(value: string): string {
   if (typeof value !== "string" || value.length === 0 || value.length > MAX_FIELD_CHARS || value.trim() !== value) {
     throw new OAuthFlowError("oauth_configuration_invalid");
   }
-  void field_name;
   return value;
 }
 

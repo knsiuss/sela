@@ -10,15 +10,9 @@ import {
 } from "./authorization.js";
 
 /** Configuration for an explicitly trusted OIDC issuer. */
-export interface OidcVerifierOptions {
-  issuer_url: string;
-  jwks_url: string;
-  audience: string;
+export interface OidcVerifierOptions extends Rs256JwtOptions {
+  /** Claim carrying the per-tenant role map; defaults to `tenant_roles`. */
   tenant_roles_claim?: string;
-  clock_skew_seconds?: number;
-  jwks_cache_ms?: number;
-  fetch?: typeof globalThis.fetch;
-  clock?: () => number;
 }
 
 /** Configuration for signature and registered-claim verification alone. */
@@ -30,6 +24,25 @@ export interface Rs256JwtOptions {
   jwks_cache_ms?: number;
   fetch?: typeof globalThis.fetch;
   clock?: () => number;
+  /**
+   * A signing-key cache to reuse across verifications.
+   *
+   * Without it every call builds its own key set, so the JWKS endpoint is
+   * fetched again per verification and the cache TTL is meaningless.
+   */
+  key_set?: SigningKeySet;
+}
+
+/**
+ * A bounded cache of the issuer's signing keys.
+ *
+ * Exposed as a port so a long-lived owner (a verifier, a composition root) can
+ * hold one instance and reuse it, while `verify_rs256_jwt` still works on its
+ * own for a single verification.
+ */
+export interface SigningKeySet {
+  /** Resolve a signing key by key id, refreshing the cache only on expiry. */
+  find(kid: string): Promise<ReturnType<typeof createPublicKey>>;
 }
 
 /** One cached signing key. */
@@ -111,24 +124,26 @@ export function supabase_oidc_options_from_env(
 /**
  * Decide whether a verified token actually attests a second factor.
  *
- * Providers disagree on the shape of the MFA signal, so all three documented
- * forms are accepted and nothing else:
+ * Providers disagree on the shape of the MFA signal, so the two forms both
+ * identity providers in scope emit are accepted and nothing else:
  *
  * - Supabase Auth emits `aal: "aal2"` and an `amr` array of objects shaped
  *   `{ method, timestamp }`.
  * - Google and generic OIDC providers emit `amr` as an array of method strings.
- * - Some gateways emit an explicit boolean `has_mfa` claim.
  *
- * An `amr` entry that is neither a known string nor an object with a known
- * `method` grants nothing, so an unfamiliar claim shape fails closed to
- * "unverified MFA" and therefore blocks privileged actions.
+ * A bare boolean claim is deliberately *not* accepted. `has_mfa` is not part of
+ * OIDC, Supabase Auth, or Google's ID-token claims, so honouring it would let any
+ * issuer that can set a boolean on a token self-assert a second factor and
+ * unlock the privileged actions. An `amr` entry that is neither a known string
+ * nor an object with a known `method`, and any other claim shape, grants nothing,
+ * so an unfamiliar signal fails closed to "unverified MFA" and therefore blocks
+ * privileged actions.
  *
  * @param payload - Claims from an already signature-verified token.
  * @returns True only when a recognised second-factor signal is present.
  */
 export function has_verified_mfa(payload: Record<string, unknown>): boolean {
   if (payload["aal"] === "aal2") return true;
-  if (payload["has_mfa"] === true) return true;
   const amr = payload["amr"];
   if (!Array.isArray(amr)) return false;
   return amr.some((entry) => {
@@ -137,6 +152,17 @@ export function has_verified_mfa(payload: Record<string, unknown>): boolean {
     const method = (entry as Record<string, unknown>)["method"];
     return typeof method === "string" && MFA_METHODS.has(method.toLowerCase());
   });
+}
+
+/**
+ * Build a signing-key cache that outlives a single verification.
+ *
+ * @param options - HTTPS JWKS URL, fetch, cache TTL, and clock.
+ * @returns A key set whose cache is shared by every verification that uses it.
+ * @throws TypeError when the JWKS URL or fetch implementation is unusable.
+ */
+export function create_signing_key_set(options: Rs256JwtOptions): SigningKeySet {
+  return new JwksKeySet(options);
 }
 
 /**
@@ -158,7 +184,7 @@ export async function verify_rs256_jwt(
   options: Rs256JwtOptions,
 ): Promise<Record<string, unknown>> {
   const issuer = require_https_url(options.issuer_url, "issuer_url");
-  const jwks = new JwksKeySet(options);
+  const jwks = options.key_set ?? create_signing_key_set(options);
   const skew = bounded_integer(options.clock_skew_seconds ?? DEFAULT_CLOCK_SKEW_SECONDS, "clock_skew_seconds", 600);
   const clock = options.clock ?? Date.now;
   const compact = required_text(token, "access_token", MAX_TOKEN_BYTES);
@@ -193,7 +219,7 @@ export async function verify_rs256_jwt(
 export class OidcJwtVerifier implements OidcIdentityVerifier {
   private readonly audience: string;
   private readonly roles_claim: string;
-  private readonly keys: JwksKeySet;
+  private readonly keys: SigningKeySet;
   private readonly clock: () => number;
   private readonly skew: number;
   private readonly issuer: string;
@@ -201,7 +227,7 @@ export class OidcJwtVerifier implements OidcIdentityVerifier {
   /** Create a verifier with explicit issuer, audience, and HTTPS JWKS settings. */
   constructor(options: OidcVerifierOptions) {
     this.issuer = require_https_url(options.issuer_url, "issuer_url");
-    this.keys = new JwksKeySet(options);
+    this.keys = options.key_set ?? create_signing_key_set(options);
     this.audience = required_text(options.audience, "audience", 512);
     this.roles_claim = required_text(options.tenant_roles_claim ?? DEFAULT_ROLES_CLAIM, "tenant_roles_claim", 256);
     this.skew = bounded_integer(options.clock_skew_seconds ?? DEFAULT_CLOCK_SKEW_SECONDS, "clock_skew_seconds", 600);
@@ -257,7 +283,7 @@ export class OidcJwtVerifier implements OidcIdentityVerifier {
 }
 
 /** Bounded HTTPS JWKS cache shared by one verifier instance. */
-class JwksKeySet {
+class JwksKeySet implements SigningKeySet {
   private readonly jwks_url: string;
   private readonly fetch_implementation: typeof globalThis.fetch;
   private readonly clock: () => number;

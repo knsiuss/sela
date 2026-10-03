@@ -72,6 +72,10 @@ export async function verify_staff_id_token(
       jwks_url: options.jwks_url,
       audience,
       ...(options.clock_skew_seconds === undefined ? {} : { clock_skew_seconds: options.clock_skew_seconds }),
+      // Forwarded so a deployment that holds one key set per provider keeps its
+      // JWKS cache across logins instead of refetching per verification.
+      ...(options.jwks_cache_ms === undefined ? {} : { jwks_cache_ms: options.jwks_cache_ms }),
+      ...(options.key_set === undefined ? {} : { key_set: options.key_set }),
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
       ...(options.clock === undefined ? {} : { clock: options.clock }),
     });

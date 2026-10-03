@@ -132,13 +132,19 @@ describe("session cookie policy", () => {
 });
 
 describe("session lifecycle", () => {
-  it("resolves a live session and refreshes its last-seen time", async () => {
-    const { store, session } = await established(true);
+  it("resolves a live session and persists a refreshed last-seen time", async () => {
+    const { store, session, advance } = await established(true);
+    advance(90_000);
     const resolved = await store.resolve(session.cookie_value);
     expect(resolved.subject_id).toBe("staff-subject-1");
     expect(resolved.has_mfa).toBe(true);
     expect(resolved.session.revoked_at_iso).toBeNull();
     expect(resolved.session.device_hash).toMatch(/^[0-9a-f]{64}$/);
+    // The returned record is the snapshot taken at resolution time, so the
+    // refreshed last-seen is asserted against what the store kept.
+    const [stored] = await store.list_subject_sessions("staff-subject-1");
+    expect(stored?.session.last_seen_at_iso).toBe(new Date(START_MS + 90_000).toISOString());
+    expect(stored?.session.last_seen_at_iso).not.toBe(session.record.session.last_seen_at_iso);
   });
 
   it("actually stops working after revocation", async () => {
@@ -176,7 +182,7 @@ describe("session lifecycle", () => {
 
   it("issues a distinct session id per login so a pre-auth id cannot be reused", async () => {
     const { store } = await established(true);
-    const second = await store.create({
+    const login = async () => store.create({
       subject_id: "staff-subject-1",
       issuer: "https://idp.example",
       idp: "supabase",
@@ -185,8 +191,17 @@ describe("session lifecycle", () => {
       device_id: "device-abc",
       ttl_seconds: 3600,
     });
+    const first = await login();
+    const second = await login();
+    // Both halves of the cookie are drawn fresh at authentication time, so two
+    // logins of the same subject share neither the registry id nor the cookie id.
+    expect(second.record.session.session_id).not.toBe(first.record.session.session_id);
+    expect(second.cookie_value).not.toBe(first.cookie_value);
+    expect(second.cookie_value.split(".")[0]).not.toBe(first.cookie_value.split(".")[0]);
+    // The stored registry id is derived from both cookie halves, so it is not the
+    // raw cookie id a pre-authentication attacker could have guessed.
     expect(second.record.session.session_id).not.toBe(second.cookie_value.split(".")[0]);
-    expect(second.record.session.session_id.startsWith("")).toBe(true);
+    expect(second.record.session.session_id).toContain(second.cookie_value.split(".")[0] as string);
   });
 
   it("never exposes a raw secret through the stored record", async () => {

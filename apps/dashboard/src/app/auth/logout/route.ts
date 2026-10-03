@@ -6,6 +6,10 @@
  */
 
 import { runtime, revoke_session } from "../runtime";
+import { read_session_cookie, workspace_redirect } from "../route_helpers";
+
+/** Landing path after a logout, on the configured public origin. */
+const LOGIN_PATH = "/auth/login";
 
 /**
  * Revoke the session addressed by the request cookie.
@@ -23,34 +27,22 @@ export async function POST(request: Request): Promise<Response> {
     return new Response(null, {
       status: 302,
       headers: {
-        Location: new URL("/auth/login", url.origin).toString(),
+        Location: workspace_redirect(parts, LOGIN_PATH),
         "Set-Cookie": await revoke_session(parts, cookie_value),
       },
     });
   } catch {
     // Even without a resolvable runtime the browser must stop holding the
     // cookie, so the response clears it with the documented default attributes.
+    // The Location stays relative in this branch: the configured origin is
+    // exactly what cannot be read here, and the request origin is never
+    // trusted in its place.
     return new Response(null, {
       status: 302,
       headers: {
-        Location: new URL("/auth/login", url.origin).toString(),
+        Location: LOGIN_PATH,
         "Set-Cookie": "__Host-sel_session=; Path=/; SameSite=Lax; Max-Age=0; HttpOnly; Secure",
       },
     });
   }
-}
-
-/**
- * Extract the session cookie from a `Cookie` header.
- *
- * @param header - Raw `Cookie` request header.
- * @returns The cookie value, or undefined when absent.
- */
-function read_session_cookie(header: string | null): string | undefined {
-  if (header === null) return undefined;
-  for (const part of header.split(";")) {
-    const [name, ...rest] = part.trim().split("=");
-    if (name === "__Host-sel_session" || name === "sel_session") return rest.join("=");
-  }
-  return undefined;
 }

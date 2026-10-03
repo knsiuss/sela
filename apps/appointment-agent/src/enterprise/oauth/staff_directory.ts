@@ -21,7 +21,6 @@
  */
 
 import {
-  AuthorizationError,
   parse_authenticated_principal,
   type AuthenticatedPrincipal,
   type EnterpriseRole,
@@ -41,6 +40,7 @@ const MAX_DIRECTORY_ENTRIES = 5_000;
 const MAX_MEMBERSHIPS_PER_SUBJECT = 50;
 const MAX_ISSUER_CHARS = 512;
 const MAX_ID_CHARS = 256;
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$/;
 const ROLES: ReadonlySet<string> = new Set<EnterpriseRole>([
   "owner", "admin", "operator", "support", "analyst", "developer",
@@ -111,7 +111,7 @@ export class InMemoryStaffDirectory implements StaffDirectory {
    * @returns A defensive copy of the recorded memberships.
    */
   async list_memberships(subject_id: string, issuer: string): Promise<readonly StaffTenantMembership[]> {
-    const found = this.by_identity.get(directory_key(require_id(subject_id, "subject_id"), issuer));
+    const found = this.by_identity.get(directory_key(require_id(subject_id), issuer));
     return found === undefined ? [] : found.map((membership) => ({ ...membership, roles: [...membership.roles] }));
   }
 
@@ -167,7 +167,7 @@ export async function build_staff_principal(
   input: { subject_id: string; issuer: string; has_mfa: boolean; issued_at_iso: string },
   directory: StaffDirectory,
 ): Promise<AuthenticatedPrincipal> {
-  const subject_id = require_id(input?.subject_id, "subject_id");
+  const subject_id = require_id(input?.subject_id);
   const issuer = require_issuer(input?.issuer);
   if (typeof input.has_mfa !== "boolean") throw new OAuthFlowError("oauth_configuration_invalid");
   const memberships = await directory.list_memberships(subject_id, issuer);
@@ -185,18 +185,6 @@ export async function build_staff_principal(
     session_id: `staff-session-${subject_id}`,
     issued_at_iso: input.issued_at_iso,
   });
-}
-
-/**
- * Fail-closed re-check that a principal still carries a tenant scope.
- *
- * @param principal - Principal resolved from a session cookie.
- * @param tenant_id - Tenant the request targets.
- * @throws AuthorizationError when the principal has no membership there.
- */
-export function assert_principal_tenant(principal: AuthenticatedPrincipal, tenant_id: string): void {
-  const roles = principal.tenant_roles[tenant_id];
-  if (roles === undefined || roles.length === 0) throw new AuthorizationError("forbidden");
 }
 
 /** Validate one configured membership entry into the directory's shape. */
@@ -232,7 +220,7 @@ function validate_user_record(raw: RawDirectoryEntry): UserRecord {
   if (typeof tenant_id !== "string" || !/^[1-9]\d{0,18}$/.test(tenant_id)) {
     throw new OAuthFlowError("oauth_configuration_invalid");
   }
-  const subject_id = require_id(raw.subject_id, "subject_id");
+  const subject_id = require_id(raw.subject_id);
   require_issuer(raw.issuer);
   const invited_at_iso = require_timestamp(raw.invited_at_iso);
   const updated_at_iso = require_timestamp(raw.updated_at_iso);
@@ -241,7 +229,7 @@ function validate_user_record(raw: RawDirectoryEntry): UserRecord {
     : require_timestamp(raw.activated_at_iso);
   return {
     user_id: subject_id,
-    org_id: require_id(raw.org_id, "org_id"),
+    org_id: require_id(raw.org_id),
     tenant_id,
     status,
     invited_at_iso,
@@ -275,11 +263,10 @@ function require_status(value: unknown): UserLifecycleStatus {
  * Validate an opaque identifier such as a subject or org id.
  *
  * @param value - Untrusted identifier from configuration or a token.
- * @param field_name - Field name reported in the failure code only.
  * @returns The validated identifier.
  * @throws OAuthFlowError when the identifier is malformed.
  */
-function require_id(value: unknown, field_name: string): string {
+function require_id(value: unknown): string {
   if (typeof value !== "string" || value.length > MAX_ID_CHARS || !ID_PATTERN.test(value)) {
     throw new OAuthFlowError("oauth_configuration_invalid");
   }
@@ -288,6 +275,11 @@ function require_id(value: unknown, field_name: string): string {
 
 /**
  * Validate a normalized issuer URL.
+ *
+ * An issuer is a web origin the browser was redirected to, so the scheme is
+ * checked rather than the host alone: accepting any scheme on a loopback name
+ * would let `ftp://localhost/x` name an "issuer" that no browser or provider
+ * could ever have produced.
  *
  * @param value - Untrusted issuer from a token or configuration.
  * @returns The validated issuer without a trailing slash.
@@ -304,7 +296,9 @@ function require_issuer(value: unknown): string {
   } catch {
     throw new OAuthFlowError("oauth_configuration_invalid");
   }
-  if (parsed.protocol !== "https:" && parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") {
+  const is_https = parsed.protocol === "https:";
+  const is_loopback_http = parsed.protocol === "http:" && LOOPBACK_HOSTS.has(parsed.hostname);
+  if (!is_https && !is_loopback_http) {
     throw new OAuthFlowError("oauth_configuration_invalid");
   }
   return normalized;

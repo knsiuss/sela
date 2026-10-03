@@ -13,8 +13,11 @@
  *   `return_path` that is checked against a configuration allow-list.
  *
  * The in-memory state, session, and grant stores are correct for a single
- * process. A multi-instance deployment must inject shared adapters for the three
- * ports, which is why they are ports rather than module-level objects.
+ * process. Because they are, `runtime()` refuses to start when the configured
+ * public origin is not loopback: a second instance would not see a login state,
+ * a session revocation, or a grant revoke issued by the first. A multi-instance
+ * deployment must inject shared adapters for the three ports, which is why they
+ * are ports rather than module-level objects.
  *
  * This module imports `node:crypto` and reads the environment, so it must only
  * ever be imported from route handlers and Server Components. Next.js rejects the
@@ -32,6 +35,8 @@ import {
   build_staff_principal,
   complete_authorization,
   google_code_exchanger,
+  google_grant_revoker,
+  is_loopback_public_base_url,
   parse_session_cookie,
   parse_staff_auth_config,
   parse_staff_directory,
@@ -46,6 +51,8 @@ import {
   type StaffSessionStore,
 } from "appointment-agent/dist/src/enterprise/oauth/index.js";
 import { GoogleTokenGrantStore } from "appointment-agent/dist/src/enterprise/google_token_grants.js";
+import { create_signing_key_set } from "appointment-agent/dist/src/enterprise/oidc_verifier.js";
+import type { SigningKeySet } from "appointment-agent/dist/src/enterprise/oidc_verifier.js";
 import { create_tenant_secret_cipher } from "appointment-agent/dist/src/security/tenant_secret_cipher.js";
 import { parse_recipient_key_ring } from "appointment-agent/dist/src/security/recipient_key_ring.js";
 import type { AuthenticatedPrincipal, EnterpriseRole } from "appointment-agent/dist/src/enterprise/authorization.js";
@@ -66,6 +73,11 @@ export interface StaffAuthRuntime {
   directory: InMemoryStaffDirectory;
   grants: GoogleTokenGrantStore;
   audit: InMemoryOAuthAuditSink;
+  /**
+   * One signing-key cache per provider, held for the process lifetime so the
+   * JWKS endpoint is fetched once per key rotation rather than once per login.
+   */
+  key_sets: ReadonlyMap<IdProviderConfig["idp"], SigningKeySet>;
 }
 
 let cached_runtime: StaffAuthRuntime | undefined;
@@ -75,11 +87,20 @@ let cached_runtime: StaffAuthRuntime | undefined;
  *
  * @param env - Environment mapping; defaults to the process environment.
  * @returns The cached runtime, built on first use.
- * @throws OAuthFlowError when staff authentication is not fully configured.
+ * @throws OAuthFlowError when staff authentication is not fully configured, or
+ * when the in-memory stores below are combined with a public origin that is not
+ * loopback.
  */
 export function runtime(env: Record<string, string | undefined> = process.env): StaffAuthRuntime {
   if (cached_runtime !== undefined) return cached_runtime;
   const config = parse_staff_auth_config(env);
+  // The state, session, and grant stores below are single-process, so a second
+  // instance would not see a login state, a session revocation, or a grant
+  // revoke issued by the first. Publishing that beyond loopback turns a
+  // single-use control into a per-instance one, so it is refused at startup
+  // rather than discovered during an incident. A shared adapter replaces these
+  // three ports and removes the restriction.
+  if (!is_loopback_public_base_url(config)) throw new OAuthFlowError("oauth_configuration_invalid");
   const ring = parse_recipient_key_ring(env);
   cached_runtime = {
     config,
@@ -88,8 +109,12 @@ export function runtime(env: Record<string, string | undefined> = process.env): 
     directory: parse_staff_directory(env["STAFF_DIRECTORY_JSON"]),
     grants: new GoogleTokenGrantStore(create_tenant_secret_cipher(ring), {
       sink: new InMemoryOAuthAuditSink(),
+      // Without a revoker the store refuses to revoke, which would leave a
+      // suspected leak with no way to un-mint the credential at the provider.
+      revoke_upstream: google_grant_revoker(),
     }),
     audit: new InMemoryOAuthAuditSink(),
+    key_sets: build_key_sets(config),
   };
   return cached_runtime;
 }
@@ -97,6 +122,19 @@ export function runtime(env: Record<string, string | undefined> = process.env): 
 /** Drop the cached runtime. Exposed so tests never inherit ambient config. */
 export function reset_runtime(): void {
   cached_runtime = undefined;
+}
+
+/** Build one signing-key cache per configured provider. */
+function build_key_sets(config: StaffAuthConfig): ReadonlyMap<IdProviderConfig["idp"], SigningKeySet> {
+  const key_sets = new Map<IdProviderConfig["idp"], SigningKeySet>();
+  for (const provider of config.providers) {
+    key_sets.set(provider.idp, create_signing_key_set({
+      issuer_url: provider.issuer_url,
+      jwks_url: provider.jwks_url,
+      audience: provider.staff_audience,
+    }));
+  }
+  return key_sets;
 }
 
 /**
@@ -146,7 +184,7 @@ export async function finish_login(
   const completed = await complete_authorization(
     parts.state_store,
     exchanger_for(provider),
-    id_token_options(provider),
+    id_token_options(provider, require_key_set(parts, provider.idp)),
     {
       idp,
       expected_purpose: "staff_login",
@@ -228,7 +266,7 @@ export async function finish_calendar_consent(
   const completed = await complete_authorization(
     parts.state_store,
     exchanger_for(provider),
-    id_token_options(provider),
+    id_token_options(provider, require_key_set(parts, provider.idp)),
     {
       idp: "google",
       expected_purpose: "calendar_consent",
@@ -277,6 +315,24 @@ export async function principal_from_cookie(
   if (cookie_value === undefined || cookie_value === "") throw new OAuthFlowError("oauth_session_unavailable");
   const parsed = parse_session_cookie(cookie_value);
   return session_principal(await parts.session_store.resolve(`${parsed.session_id}.${parsed.secret}`));
+}
+
+/**
+ * Revoke a tenant's Google Calendar grant on both sides.
+ *
+ * This is the entry point RB-15 names for a suspected credential leak. It
+ * resolves nothing from the request and takes only the tenant id, because
+ * destroying the local copy without Google's confirmation would leave the
+ * provider-side credential live and the operator with nothing left to retry.
+ *
+ * @param parts - Resolved runtime.
+ * @param tenant_id - Tenant whose grant is being withdrawn.
+ * @returns True once Google has invalidated the grant and the local row is gone.
+ * @throws OAuthFlowError when there is no grant, or when Google did not accept
+ * the revoke. The grant stays stored and revocable in either failure case.
+ */
+export async function revoke_google_grant(parts: StaffAuthRuntime, tenant_id: string): Promise<boolean> {
+  return parts.grants.revoke_google_grant(tenant_id);
 }
 
 /**
@@ -331,12 +387,20 @@ function exchanger_for(provider: IdProviderConfig) {
     : supabase_code_exchanger(provider.issuer_url, { auth_method: "client_secret_basic" });
 }
 
+/** Require the provider's long-lived signing-key cache. */
+function require_key_set(parts: StaffAuthRuntime, idp: IdProviderConfig["idp"]): SigningKeySet {
+  const key_set = parts.key_sets.get(idp);
+  if (key_set === undefined) throw new OAuthFlowError("oauth_configuration_invalid");
+  return key_set;
+}
+
 /** Build ID-token verification options for a provider. */
-function id_token_options(provider: IdProviderConfig) {
+function id_token_options(provider: IdProviderConfig, key_set: SigningKeySet) {
   return {
     issuer_url: provider.issuer_url,
     jwks_url: provider.jwks_url,
-    staff_audience: provider.client_id,
+    staff_audience: provider.staff_audience,
+    key_set,
     ...(provider.hosted_domain === undefined ? {} : { expected_hosted_domain: provider.hosted_domain }),
   };
 }
