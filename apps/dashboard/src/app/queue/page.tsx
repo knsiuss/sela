@@ -1,15 +1,16 @@
 import type { ReactElement } from "react";
 import { PageHeader } from "@/components/PageHeader";
 import { QueueBoard } from "@/components/QueueBoard";
-import { load_local_scope } from "../local_scope";
+import { load_workspace_scope } from "../local_scope";
+import { require_session_principal } from "../auth/session";
 
 /**
  * Render the assignment, escalation, and SLA workflow.
  *
  * @returns The queue page.
  */
-export default function QueuePage(): ReactElement {
-  const { snapshot } = load_local_scope();
+export default async function QueuePage(): Promise<ReactElement> {
+  const { snapshot } = load_workspace_scope(await require_session_principal());
   return (
     <>
       <PageHeader

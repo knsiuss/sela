@@ -21,7 +21,7 @@
 import type { ReactElement, ReactNode } from "react";
 import { LocalOnlyBanner } from "@repo/ui";
 import type { WorkspaceSnapshot } from "@/domain/workspace_state";
-import type { LocalPrincipalClaims } from "@/domain/synthetic_principal";
+import type { PrincipalClaims } from "@/domain/principal_claims";
 import { SiteNav } from "./SiteNav";
 import { ThemeToggle } from "./ThemeToggle";
 import { WorkspaceProvider } from "./WorkspaceProvider";
@@ -31,7 +31,7 @@ export interface AppShellProps {
   tenant_id: string;
   role: string;
   snapshot: WorkspaceSnapshot;
-  principal: LocalPrincipalClaims;
+  principal: PrincipalClaims;
   children: ReactNode;
 }
 

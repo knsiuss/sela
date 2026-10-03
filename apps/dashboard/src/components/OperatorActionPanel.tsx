@@ -23,12 +23,22 @@ import {
   preflight_code,
   use_action_submission,
   use_operator_action_service,
+  type ActionAuthorizer,
   type ActionSelection,
 } from "./use_operator_action";
 
 /** Props for {@link OperatorActionPanel}. */
 export interface OperatorActionPanelProps {
   tenant_id: string;
+  /**
+   * Overrides the server authorization call.
+   *
+   * Production always uses the real server action. The override exists so a DOM
+   * test can drive the panel without a Next.js server runtime; it is wired
+   * through the same pure authorization contract, so a stub cannot authorize
+   * something the server would refuse.
+   */
+  authorize?: ActionAuthorizer;
 }
 
 const ACTION_DESCRIPTIONS: Readonly<Record<OperatorAction, string>> = {
@@ -67,14 +77,17 @@ export function OperatorActionPanel(props: OperatorActionPanelProps): ReactEleme
     service,
     audit,
     record_entries: workspace.record_operator_action,
+    ...(props.authorize === undefined ? {} : { authorize: props.authorize }),
   });
 
   return (
     <section className="panel" aria-labelledby="actions-heading">
       <h2 id="actions-heading">Operator actions</h2>
       <p className="panel__note">
-        Mirrors <code>POST /v1/operator/actions</code>. Server wiring is not connected yet, so attempts are
-        authorized locally against the synthetic principal and appended to the local audit ledger.
+        Mirrors <code>POST /v1/operator/actions</code>. Every attempt is authorized
+        on the server against the session-derived principal, and this panel's
+        preflight is only a hint that must agree with that decision. Attempts are
+        appended to the local audit ledger.
       </p>
       <ActionSelectors
         selection={selection}

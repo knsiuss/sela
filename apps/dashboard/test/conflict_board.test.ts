@@ -8,7 +8,8 @@ import {
   type ConflictRecord,
 } from "../src/domain/conflict_board.js";
 import { create_workspace_fixture, FIXTURE_TENANT_ID } from "../src/domain/fixtures.js";
-import { build_local_principal, type LocalPrincipalClaims, to_wire_principal } from "../src/domain/synthetic_principal.js";
+import { build_fixture_claims } from "./support/fixture_principal.js";
+import type { PrincipalClaims } from "../src/domain/principal_claims.js";
 import { parse_authenticated_principal } from "appointment-agent/dist/src/enterprise/authorization.js";
 
 const NOW_MS = Date.parse("2026-03-02T09:00:00.000Z");
@@ -20,7 +21,7 @@ function conflict(conflict_id: string): ConflictRecord {
 }
 
 function principal(role: "operator" | "support" | "owner" = "operator", has_mfa = true) {
-  const claims: LocalPrincipalClaims = to_wire_principal(build_local_principal(FIXTURE_TENANT_ID, role));
+  const claims: PrincipalClaims = build_fixture_claims(FIXTURE_TENANT_ID, role);
   return parse_authenticated_principal({ ...claims, has_mfa });
 }
 

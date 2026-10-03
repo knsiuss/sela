@@ -1,15 +1,16 @@
 import type { ReactElement } from "react";
 import { ConflictBoard } from "@/components/ConflictBoard";
 import { PageHeader } from "@/components/PageHeader";
-import { load_local_scope } from "../local_scope";
+import { load_workspace_scope } from "../local_scope";
+import { require_session_principal } from "../auth/session";
 
 /**
  * Render the conflict resolution state UI.
  *
  * @returns The conflicts page.
  */
-export default function ConflictsPage(): ReactElement {
-  const { snapshot } = load_local_scope();
+export default async function ConflictsPage(): Promise<ReactElement> {
+  const { snapshot } = load_workspace_scope(await require_session_principal());
   return (
     <>
       <PageHeader

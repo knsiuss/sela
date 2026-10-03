@@ -21,6 +21,17 @@ export interface OidcVerifierOptions {
   clock?: () => number;
 }
 
+/** Configuration for signature and registered-claim verification alone. */
+export interface Rs256JwtOptions {
+  issuer_url: string;
+  jwks_url: string;
+  audience: string;
+  clock_skew_seconds?: number;
+  jwks_cache_ms?: number;
+  fetch?: typeof globalThis.fetch;
+  clock?: () => number;
+}
+
 /** One cached signing key. */
 interface JwksKey {
   kid: string;
@@ -32,6 +43,11 @@ const DEFAULT_CLOCK_SKEW_SECONDS = 30;
 const DEFAULT_JWKS_CACHE_MS = 300_000;
 const MAX_TOKEN_BYTES = 16 * 1024;
 const MAX_JWKS_BYTES = 256 * 1024;
+
+/** Authentication methods that prove a second factor was presented. */
+const MFA_METHODS: ReadonlySet<string> = new Set([
+  "mfa", "otp", "totp", "hwk", "sms", "mfa_aware", "otp_aware", "hwk_aware",
+]);
 
 /** Build a verifier from explicit deployment environment settings. */
 export function oidc_verifier_from_env(
@@ -92,36 +108,110 @@ export function supabase_oidc_options_from_env(
   return { issuer_url, jwks_url, audience };
 }
 
+/**
+ * Decide whether a verified token actually attests a second factor.
+ *
+ * Providers disagree on the shape of the MFA signal, so all three documented
+ * forms are accepted and nothing else:
+ *
+ * - Supabase Auth emits `aal: "aal2"` and an `amr` array of objects shaped
+ *   `{ method, timestamp }`.
+ * - Google and generic OIDC providers emit `amr` as an array of method strings.
+ * - Some gateways emit an explicit boolean `has_mfa` claim.
+ *
+ * An `amr` entry that is neither a known string nor an object with a known
+ * `method` grants nothing, so an unfamiliar claim shape fails closed to
+ * "unverified MFA" and therefore blocks privileged actions.
+ *
+ * @param payload - Claims from an already signature-verified token.
+ * @returns True only when a recognised second-factor signal is present.
+ */
+export function has_verified_mfa(payload: Record<string, unknown>): boolean {
+  if (payload["aal"] === "aal2") return true;
+  if (payload["has_mfa"] === true) return true;
+  const amr = payload["amr"];
+  if (!Array.isArray(amr)) return false;
+  return amr.some((entry) => {
+    if (typeof entry === "string") return MFA_METHODS.has(entry.toLowerCase());
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false;
+    const method = (entry as Record<string, unknown>)["method"];
+    return typeof method === "string" && MFA_METHODS.has(method.toLowerCase());
+  });
+}
+
+/**
+ * Verify an RS256 JWT signature and its registered claims.
+ *
+ * This is the shared half used by both the operator API bearer verifier and the
+ * ID-token verifier behind staff login. It deliberately does not require a
+ * `sid` claim or any application-specific claim, because an OIDC ID token
+ * carries neither.
+ *
+ * @param token - Compact JWS from an Authorization header or token response.
+ * @param options - Trusted issuer, audience, HTTPS JWKS URL, and clocks.
+ * @returns The verified claim set.
+ * @throws AuthorizationError for any malformed, unsigned, expired, or
+ * wrongly-scoped token, and TypeError for unusable issuer/JWKS configuration.
+ */
+export async function verify_rs256_jwt(
+  token: string,
+  options: Rs256JwtOptions,
+): Promise<Record<string, unknown>> {
+  const issuer = require_https_url(options.issuer_url, "issuer_url");
+  const jwks = new JwksKeySet(options);
+  const skew = bounded_integer(options.clock_skew_seconds ?? DEFAULT_CLOCK_SKEW_SECONDS, "clock_skew_seconds", 600);
+  const clock = options.clock ?? Date.now;
+  const compact = required_text(token, "access_token", MAX_TOKEN_BYTES);
+  const segments = compact.split(".");
+  if (segments.length !== 3 || segments.some((segment) => segment.length === 0)) {
+    throw new AuthorizationError("unauthenticated");
+  }
+  const header = decode_json(segments[0]!, "jwt_header");
+  const payload = decode_json(segments[1]!, "jwt_payload");
+  if (
+    header.alg !== "RS256" ||
+    typeof header.kid !== "string" ||
+    header.kid.length > 256 ||
+    header.crit !== undefined
+  ) {
+    throw new AuthorizationError("unauthenticated");
+  }
+  validate_registered_claims(payload, issuer, options.audience, skew, clock);
+  const key = await jwks.find(header.kid);
+  const signature = decode_base64url(segments[2]!, "jwt_signature");
+  const valid = verify(
+    "RSA-SHA256",
+    Buffer.from(`${segments[0]}.${segments[1]}`, "utf8"),
+    key,
+    signature,
+  );
+  if (!valid) throw new AuthorizationError("unauthenticated");
+  return payload;
+}
+
 /** OIDC verifier that accepts only RS256 access tokens from a configured issuer. */
 export class OidcJwtVerifier implements OidcIdentityVerifier {
-  private readonly issuer: string;
-  private readonly jwks_url: string;
   private readonly audience: string;
   private readonly roles_claim: string;
-  private readonly clock_skew_seconds: number;
-  private readonly jwks_cache_ms: number;
-  private readonly fetch_implementation: typeof globalThis.fetch;
+  private readonly keys: JwksKeySet;
   private readonly clock: () => number;
-  private cached_keys: JwksKey[] = [];
-  private cached_at_ms = 0;
+  private readonly skew: number;
+  private readonly issuer: string;
 
   /** Create a verifier with explicit issuer, audience, and HTTPS JWKS settings. */
   constructor(options: OidcVerifierOptions) {
     this.issuer = require_https_url(options.issuer_url, "issuer_url");
-    this.jwks_url = require_https_url(options.jwks_url, "jwks_url");
+    this.keys = new JwksKeySet(options);
     this.audience = required_text(options.audience, "audience", 512);
     this.roles_claim = required_text(options.tenant_roles_claim ?? DEFAULT_ROLES_CLAIM, "tenant_roles_claim", 256);
-    this.clock_skew_seconds = bounded_integer(options.clock_skew_seconds ?? DEFAULT_CLOCK_SKEW_SECONDS, "clock_skew_seconds", 600);
-    this.jwks_cache_ms = bounded_integer(options.jwks_cache_ms ?? DEFAULT_JWKS_CACHE_MS, "jwks_cache_ms", 86_400_000);
-    this.fetch_implementation = options.fetch ?? globalThis.fetch;
-    if (typeof this.fetch_implementation !== "function") throw new TypeError("oidc-fetch-invalid");
+    this.skew = bounded_integer(options.clock_skew_seconds ?? DEFAULT_CLOCK_SKEW_SECONDS, "clock_skew_seconds", 600);
     this.clock = options.clock ?? Date.now;
   }
 
   /** Verify signature and registered claims, then normalize enterprise roles. */
   async verify(access_token: string): Promise<AuthenticatedPrincipal> {
-    const token = required_text(access_token, "access_token", MAX_TOKEN_BYTES);
-    const segments = token.split(".");
+    const compact = required_text(access_token, "access_token", MAX_TOKEN_BYTES);
+    const segments = compact.split(".");
     if (segments.length !== 3 || segments.some((segment) => segment.length === 0)) {
       throw new AuthorizationError("unauthenticated");
     }
@@ -135,43 +225,64 @@ export class OidcJwtVerifier implements OidcIdentityVerifier {
     ) {
       throw new AuthorizationError("unauthenticated");
     }
-    this.validate_claims(payload);
-    const key = await this.find_key(header.kid);
+    validate_registered_claims(payload, this.issuer, this.audience, this.skew, this.clock);
+    const key = await this.keys.find(header.kid);
     const signature = decode_base64url(segments[2]!, "jwt_signature");
-    const valid = verify(
-      "RSA-SHA256",
-      Buffer.from(`${segments[0]}.${segments[1]}`, "utf8"),
-      key,
-      signature,
-    );
+    const valid = verify("RSA-SHA256", Buffer.from(`${segments[0]}.${segments[1]}`, "utf8"), key, signature);
     if (!valid) throw new AuthorizationError("unauthenticated");
     return this.to_principal(payload);
   }
 
-  private validate_claims(payload: Record<string, unknown>): void {
-    if (
-      (payload.iss !== this.issuer && payload.iss !== `${this.issuer}/`) ||
-      typeof payload.sub !== "string" ||
-      !safe_id(payload.sub)
-    ) {
+  private to_principal(payload: Record<string, unknown>): AuthenticatedPrincipal {
+    const raw_roles = payload[this.roles_claim];
+    if (typeof raw_roles !== "object" || raw_roles === null || Array.isArray(raw_roles)) {
       throw new AuthorizationError("unauthenticated");
     }
-    if (!audience_matches(payload.aud, this.audience)) throw new AuthorizationError("unauthenticated");
-    const now_seconds = Math.floor(this.clock() / 1_000);
-    const skew = this.clock_skew_seconds;
-    if (!is_number(payload.exp) || payload.exp + skew < now_seconds) throw new AuthorizationError("unauthenticated");
-    if (payload.nbf !== undefined && (!is_number(payload.nbf) || payload.nbf - skew > now_seconds)) {
-      throw new AuthorizationError("unauthenticated");
-    }
-    if (payload.iat !== undefined && (!is_number(payload.iat) || payload.iat > now_seconds + skew)) {
-      throw new AuthorizationError("unauthenticated");
+    const tenant_roles: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
+    for (const [tenant_id, roles] of Object.entries(raw_roles)) {
+      if (!Array.isArray(roles) || roles.some((role) => !is_enterprise_role(role))) {
+        throw new AuthorizationError("unauthenticated");
+      }
+      tenant_roles[tenant_id] = roles as string[];
     }
     if (typeof payload.sid !== "string" || !safe_id(payload.sid)) throw new AuthorizationError("unauthenticated");
+    return parse_authenticated_principal({
+      subject_id: payload.sub,
+      session_id: payload.sid,
+      has_mfa: has_verified_mfa(payload),
+      issued_at_iso: new Date(is_number(payload.iat) ? payload.iat * 1_000 : this.clock()).toISOString(),
+      tenant_roles,
+    });
+  }
+}
+
+/** Bounded HTTPS JWKS cache shared by one verifier instance. */
+class JwksKeySet {
+  private readonly jwks_url: string;
+  private readonly fetch_implementation: typeof globalThis.fetch;
+  private readonly clock: () => number;
+  private readonly cache_ms: number;
+  private cached_keys: JwksKey[] = [];
+  private cached_at_ms = 0;
+
+  constructor(options: Rs256JwtOptions) {
+    this.jwks_url = require_https_url(options.jwks_url, "jwks_url");
+    this.fetch_implementation = options.fetch ?? globalThis.fetch;
+    if (typeof this.fetch_implementation !== "function") throw new TypeError("oidc-fetch-invalid");
+    this.clock = options.clock ?? Date.now;
+    this.cache_ms = bounded_integer(options.jwks_cache_ms ?? DEFAULT_JWKS_CACHE_MS, "jwks_cache_ms", 86_400_000);
   }
 
-  private async find_key(kid: string): Promise<ReturnType<typeof createPublicKey>> {
+  /**
+   * Resolve a signing key by key id, refreshing the cache only on expiry.
+   *
+   * @param kid - Key id from the JWS header.
+   * @returns The matching RSA public key.
+   * @throws AuthorizationError when the key id is unknown or the JWKS is unusable.
+   */
+  async find(kid: string): Promise<ReturnType<typeof createPublicKey>> {
     const now_ms = this.clock();
-    if (this.cached_keys.length === 0 || now_ms - this.cached_at_ms >= this.jwks_cache_ms) {
+    if (this.cached_keys.length === 0 || now_ms - this.cached_at_ms >= this.cache_ms) {
       this.cached_keys = await this.load_keys();
       this.cached_at_ms = now_ms;
     }
@@ -227,27 +338,31 @@ export class OidcJwtVerifier implements OidcIdentityVerifier {
     if (keys.length === 0 || keys.length > 100) throw new AuthorizationError("unauthenticated");
     return keys;
   }
+}
 
-  private to_principal(payload: Record<string, unknown>): AuthenticatedPrincipal {
-    const raw_roles = payload[this.roles_claim];
-    if (typeof raw_roles !== "object" || raw_roles === null || Array.isArray(raw_roles)) {
-      throw new AuthorizationError("unauthenticated");
-    }
-    const tenant_roles: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
-    for (const [tenant_id, roles] of Object.entries(raw_roles)) {
-      if (!Array.isArray(roles) || roles.some((role) => !is_enterprise_role(role))) {
-        throw new AuthorizationError("unauthenticated");
-      }
-      tenant_roles[tenant_id] = roles as string[];
-    }
-    const amr = Array.isArray(payload.amr) ? payload.amr : [];
-    return parse_authenticated_principal({
-      subject_id: payload.sub,
-      session_id: payload.sid,
-      has_mfa: amr.some((value) => value === "mfa" || value === "otp" || value === "hwk"),
-      issued_at_iso: new Date(is_number(payload.iat) ? payload.iat * 1_000 : this.clock()).toISOString(),
-      tenant_roles,
-    });
+/** Validate issuer, subject, audience, and the time-based registered claims. */
+function validate_registered_claims(
+  payload: Record<string, unknown>,
+  issuer: string,
+  audience: string,
+  skew: number,
+  clock: () => number,
+): void {
+  if (
+    (payload.iss !== issuer && payload.iss !== `${issuer}/`) ||
+    typeof payload.sub !== "string" ||
+    !safe_id(payload.sub)
+  ) {
+    throw new AuthorizationError("unauthenticated");
+  }
+  if (!audience_matches(payload.aud, audience)) throw new AuthorizationError("unauthenticated");
+  const now_seconds = Math.floor(clock() / 1_000);
+  if (!is_number(payload.exp) || payload.exp + skew < now_seconds) throw new AuthorizationError("unauthenticated");
+  if (payload.nbf !== undefined && (!is_number(payload.nbf) || payload.nbf - skew > now_seconds)) {
+    throw new AuthorizationError("unauthenticated");
+  }
+  if (payload.iat !== undefined && (!is_number(payload.iat) || payload.iat > now_seconds + skew)) {
+    throw new AuthorizationError("unauthenticated");
   }
 }
 

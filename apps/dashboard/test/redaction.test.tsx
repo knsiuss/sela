@@ -19,6 +19,8 @@ import { QueueBoard } from "../src/components/QueueBoard";
 import { build_audit_timeline } from "../src/domain/audit_timeline.js";
 import type { StampedAuditRecord } from "../src/domain/operator_action_gateway.js";
 import { build_test_snapshot, render_workspace, TEST_TENANT_ID } from "./support/render_workspace.js";
+import { stub_authorizer } from "./support/render_workspace.js";
+import { build_fixture_principal } from "./support/fixture_principal.js";
 
 /** Field names that must never appear in a dashboard payload. */
 const FORBIDDEN_KEYS = [
@@ -57,7 +59,7 @@ describe("client payload", () => {
   it("carries no forbidden key on a built audit timeline", () => {
     const rows: StampedAuditRecord[] = [{
       tenant_id: TEST_TENANT_ID,
-      actor_subject: "local-operator",
+      actor_subject: "fixture-operator",
       action: "resolve_conflict",
       target_id: "conflict-fixture-pending",
       outcome: "succeeded",
@@ -85,7 +87,7 @@ describe("rendered surfaces", () => {
         <AppointmentTable rows={snapshot.appointments} tenant_id={TEST_TENANT_ID} />
         <ConflictBoard tenant_id={TEST_TENANT_ID} />
         <QueueBoard tenant_id={TEST_TENANT_ID} />
-        <OperatorActionPanel tenant_id={TEST_TENANT_ID} />
+        <OperatorActionPanel tenant_id={TEST_TENANT_ID} authorize={stub_authorizer(build_fixture_principal(TEST_TENANT_ID, "operator", true))} />
         <AuditTimeline />
       </>,
     );
@@ -102,7 +104,7 @@ describe("rendered surfaces", () => {
   });
 
   it("renders no free-text reason input on the action surface", () => {
-    render_workspace(<OperatorActionPanel tenant_id={TEST_TENANT_ID} />);
+    render_workspace(<OperatorActionPanel tenant_id={TEST_TENANT_ID} authorize={stub_authorizer(build_fixture_principal(TEST_TENANT_ID, "operator", true))} />);
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.queryByRole("combobox", { name: /reason text/i })).toBeNull();
   });
@@ -118,7 +120,7 @@ describe("rendered surfaces", () => {
 
   it("keeps the submitted reason out of the audit timeline", async () => {
     const user = userEvent.setup();
-    render_workspace(<><h1>Actions</h1><OperatorActionPanel tenant_id={TEST_TENANT_ID} /><AuditTimeline /></>);
+    render_workspace(<><h1>Actions</h1><OperatorActionPanel tenant_id={TEST_TENANT_ID} authorize={stub_authorizer(build_fixture_principal(TEST_TENANT_ID, "operator", true))} /><AuditTimeline /></>, "operator", true);
     await user.selectOptions(screen.getByLabelText("Target"), "conflict-fixture-pending");
     await user.click(screen.getByRole("button", { name: "Run action" }));
     const timeline = screen.getByRole("region", { name: "Audit timeline" });

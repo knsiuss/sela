@@ -1,15 +1,16 @@
 import type { ReactElement } from "react";
 import { AuditTimeline } from "@/components/AuditTimeline";
 import { PageHeader } from "@/components/PageHeader";
-import { load_local_scope } from "../local_scope";
+import { load_workspace_scope } from "../local_scope";
+import { require_session_principal } from "../auth/session";
 
 /**
  * Render the redacted operator audit timeline.
  *
  * @returns The audit page.
  */
-export default function AuditPage(): ReactElement {
-  const { snapshot } = load_local_scope();
+export default async function AuditPage(): Promise<ReactElement> {
+  const { snapshot } = load_workspace_scope(await require_session_principal());
   return (
     <>
       <PageHeader

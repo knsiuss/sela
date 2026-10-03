@@ -12,13 +12,14 @@ import {
   type OperatorActionReasonCode,
   type StampingAuditStore,
 } from "../src/domain/operator_action_gateway.js";
-import { build_local_principal, type LocalPrincipalClaims, to_wire_principal } from "../src/domain/synthetic_principal.js";
+import { build_fixture_claims } from "./support/fixture_principal.js";
+import type { PrincipalClaims } from "../src/domain/principal_claims.js";
 
 const TENANT_ID = "1001";
 const TARGETS = { conflict_ids: ["conflict-fixture-pending"], queue_item_ids: ["queue-fixture-unassigned"] };
 
 function principal(role: "operator" | "owner" = "operator", has_mfa = true) {
-  const claims: LocalPrincipalClaims = to_wire_principal(build_local_principal(TENANT_ID, role));
+  const claims: PrincipalClaims = build_fixture_claims(TENANT_ID, role);
   return parse_authenticated_principal({ ...claims, has_mfa });
 }
 
@@ -67,7 +68,7 @@ describe("can_run_operator_action", () => {
 
   it("blocks an MFA-gated action when the principal has no MFA claims", () => {
     const service = create_local_action_service(store(), TARGETS);
-    const claims: LocalPrincipalClaims = to_wire_principal(build_local_principal(TENANT_ID, "owner"));
+    const claims: PrincipalClaims = build_fixture_claims(TENANT_ID, "owner");
     const without_mfa = parse_authenticated_principal({ ...claims, has_mfa: false });
     const candidate = build_operator_action_request({
       principal: without_mfa, tenant_id: TENANT_ID, action: "replay_outbound",
@@ -88,7 +89,7 @@ describe("run_operator_action", () => {
     const service = create_local_action_service(audit, TARGETS);
     const outcome = await run_operator_action(service, request("release_hold", "queue-fixture-unassigned"));
     expect(outcome).toEqual({ status: "succeeded", action: "release_hold", target_id: "queue-fixture-unassigned", code: null });
-    expect(audit.records[0]).toMatchObject({ outcome: "succeeded", actor_subject: "local-operator" });
+    expect(audit.records[0]).toMatchObject({ outcome: "succeeded", actor_subject: "fixture-operator" });
   });
 
   it("audits a denial instead of executing", async () => {

@@ -12,8 +12,10 @@ import { render, type RenderResult } from "@testing-library/react";
 import { vi } from "vitest";
 import { AppShell } from "../../src/components/AppShell";
 import { create_workspace_fixture } from "../../src/domain/fixtures";
-import { build_local_principal, to_wire_principal } from "../../src/domain/synthetic_principal";
-import type { EnterpriseRole } from "appointment-agent/dist/src/enterprise/authorization.js";
+import { build_fixture_claims, build_fixture_principal } from "./fixture_principal";
+import { authorize_operator_action } from "../../src/domain/action_receipt";
+import type { AuthenticatedPrincipal, EnterpriseRole } from "appointment-agent/dist/src/enterprise/authorization.js";
+import type { ActionAuthorizer } from "../../src/components/use_operator_action";
 import { create_workspace_snapshot, type WorkspaceSnapshot } from "../../src/domain/workspace_state";
 
 vi.mock("next/navigation", () => ({ usePathname: () => "/queue" }));
@@ -45,20 +47,49 @@ export function build_test_snapshot(role: EnterpriseRole = "operator"): Workspac
 }
 
 /**
+ * Build a stand-in for the server authorization action.
+ *
+ * The stub runs the *same* pure authorization contract the server action uses,
+ * against the same fixture principal, so it can never authorize something the
+ * server would refuse. Only the HMAC receipt is omitted, because signing belongs
+ * to the server and the receipt is consumed server-side.
+ *
+ * @param principal - Fixture principal the stub authorizes as.
+ * @returns An authorizer for {@link OperatorActionPanel}.
+ */
+export function stub_authorizer(principal: AuthenticatedPrincipal): ActionAuthorizer {
+  return async (request) => {
+    const privileged = request.action === "replay_outbound";
+    const code = authorize_operator_action(principal, request, privileged);
+    return { code, receipt: code === null ? "fixture-receipt" : null };
+  };
+}
+
+/**
  * Render one workspace view inside the real application shell.
  *
+ * `has_mfa` defaults to `false` because that is what a session without a verified
+ * second factor looks like. A test that exercises an MFA-gated action must pass
+ * `true` explicitly, which keeps the privileged path visible in the test source
+ * instead of being an ambient property of the fixture.
+ *
  * @param view - View component to render as the page content.
- * @param role - Local synthetic role for the acting principal.
+ * @param role - Role the fixture principal holds in the tenant.
+ * @param has_mfa - Whether the fixture principal simulates a verified second factor.
  * @returns Render result plus the snapshot the view started from.
  */
-export function render_workspace(view: ReactElement, role: EnterpriseRole = "operator"): WorkspaceRender {
+export function render_workspace(
+  view: ReactElement,
+  role: EnterpriseRole = "operator",
+  has_mfa = false,
+): WorkspaceRender {
   const snapshot = build_test_snapshot(role);
   const result = render(
     <AppShell
       tenant_id={TEST_TENANT_ID}
       role={role}
       snapshot={snapshot}
-      principal={to_wire_principal(build_local_principal(TEST_TENANT_ID, role))}
+      principal={build_fixture_claims(TEST_TENANT_ID, role, has_mfa)}
     >
       {view}
     </AppShell>,

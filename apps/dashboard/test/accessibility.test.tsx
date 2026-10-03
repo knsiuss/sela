@@ -22,6 +22,8 @@ import { ConflictBoard } from "../src/components/ConflictBoard";
 import { OperatorActionPanel } from "../src/components/OperatorActionPanel";
 import { QueueBoard } from "../src/components/QueueBoard";
 import { build_test_snapshot, render_workspace, TEST_TENANT_ID } from "./support/render_workspace.js";
+import { stub_authorizer } from "./support/render_workspace.js";
+import { build_fixture_principal } from "./support/fixture_principal.js";
 
 interface ViewCase {
   name: string;
@@ -35,7 +37,7 @@ const VIEW_CASES: readonly ViewCase[] = [
   },
   { name: "conflicts", render: () => <><h1>Conflicts</h1><ConflictBoard tenant_id={TEST_TENANT_ID} /></> },
   { name: "queue", render: () => <><h1>Queue</h1><QueueBoard tenant_id={TEST_TENANT_ID} /></> },
-  { name: "actions", render: () => <><h1>Actions</h1><OperatorActionPanel tenant_id={TEST_TENANT_ID} /></> },
+  { name: "actions", render: () => <><h1>Actions</h1><OperatorActionPanel tenant_id={TEST_TENANT_ID} authorize={stub_authorizer(build_fixture_principal(TEST_TENANT_ID, "operator", true))} /></> },
   { name: "audit", render: () => <><h1>Audit</h1><AuditTimeline /></> },
 ];
 
@@ -159,7 +161,7 @@ describe("disabled control explanations", () => {
 
   it("associates a visible reason with a blocked operator action", async () => {
     const user = userEvent.setup();
-    render_workspace(<OperatorActionPanel tenant_id={TEST_TENANT_ID} />);
+    render_workspace(<OperatorActionPanel tenant_id={TEST_TENANT_ID} authorize={stub_authorizer(build_fixture_principal(TEST_TENANT_ID, "operator", true))} />, "operator", true);
     const allowed = screen.getByRole("button", { name: "Run action" });
     expect((allowed as HTMLButtonElement).disabled).toBe(false);
     expect(allowed.getAttribute("aria-describedby")).toBeNull();
@@ -174,7 +176,7 @@ describe("disabled control explanations", () => {
 
 describe("status is never conveyed by colour alone", () => {
   it("renders a text label beside every status badge", () => {
-    render_workspace(<ConflictBoard tenant_id={TEST_TENANT_ID} />);
+    render_workspace(<ConflictBoard tenant_id={TEST_TENANT_ID} />, "operator", true);
     const badges = document.querySelectorAll("[data-status]");
     expect(badges.length).toBeGreaterThan(0);
     for (const badge of badges) {

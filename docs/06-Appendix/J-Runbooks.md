@@ -83,6 +83,16 @@ P0.6 evidence: per-tenant Meta credentials resolve at runtime through the secret
 3. Require MFA and an append-only `operator_action_audit` row for replay, cancellation, or tenant-management actions. Never persist the free-form reason or access token.
 4. Revoke the session and rotate provider credentials immediately if an operator token or JWKS response is suspected compromised. Preserve audit evidence and follow RB-06.
 
+## RB-15 Staff sign-in, Calendar consent, and grant revocation (owner: security/operations)
+
+1. Verify the issuer, JWKS URL, staff audience, and client credentials are a complete set per provider. A partial set fails closed with `oauth_configuration_invalid`; the workspace renders its sign-in notice rather than an unauthenticated dashboard. Confirm `STAFF_AUTH_REDIRECT_ALLOW_LIST` contains every configured callback URI, and that each callback is https (or an http loopback address with `STAFF_AUTH_ALLOW_INSECURE_LOOPBACK=true`).
+2. Test the CSRF and replay controls on every callback before enabling access: a callback with no `state`, an unknown `state`, a malformed `state`, and a replayed `state` must each be refused with `oauth_state_missing` / `oauth_state_unknown` / `oauth_state_malformed` / `oauth_state_replayed`. Confirm the authorize redirect carries `code_challenge_method=S256`, a `nonce`, and no client secret.
+3. Confirm the privileged gate stays closed: a staff session whose IdP reports no second factor must be refused `outbound:replay`, cancellation, and tenant management with `mfa_required`. Supabase reports this as `aal: "aal2"`; Google as an `mfa`/`otp`/`totp` entry in `amr`. Do not treat a missing claim as verified.
+4. Confirm MFA is *derived*, never asserted by the client, and that a Google sign-in carries the configured `GOOGLE_WORKSPACE_HOSTED_DOMAIN` in its `hd` claim when one is set.
+5. For a suspected credential leak: revoke the session from the operator surface, then revoke the Google grant. Grant revocation is two-sided — `revoke_google_grant` deletes the local row **and** asks Google to invalidate the credential; a local delete alone cannot un-mint a credential the provider already issued. Record tenant id, key ids, timestamps, and the revoke outcome, never the refresh token.
+6. Rotate `STAFF_ACTION_RECEIPT_KEY_BASE64` after any suspected action-receipt key compromise. Rotation invalidates outstanding receipts only, so it is safe during an incident; it does not revoke sessions.
+7. Preserved evidence: `state`/`nonce`/PKCE material, authorization codes, access tokens, ID tokens, refresh tokens, and email addresses must never appear in logs, metrics, incident records, or commits. The audit sink carries only a closed vocabulary of event names and outcomes plus a tenant id.
+
 ## RB-13 Disaster recovery (owner: infrastructure/SRE)
 
 1. Validate approved RPO/RTO, backup reference, restore-test timestamp, and data-residency region. A missing value is a release blocker.

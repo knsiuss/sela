@@ -16,7 +16,7 @@ const ALLOWED_KEYS = [
 function record(overrides: Partial<StampedAuditRecord> = {}): StampedAuditRecord {
   return {
     tenant_id: "1001",
-    actor_subject: "local-operator",
+    actor_subject: "fixture-operator",
     action: "resolve_conflict",
     target_id: "conflict-fixture-pending",
     outcome: "succeeded",

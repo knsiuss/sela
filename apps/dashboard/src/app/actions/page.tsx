@@ -1,15 +1,16 @@
 import type { ReactElement } from "react";
 import { OperatorActionPanel } from "@/components/OperatorActionPanel";
 import { PageHeader } from "@/components/PageHeader";
-import { load_local_scope } from "../local_scope";
+import { load_workspace_scope } from "../local_scope";
+import { require_session_principal } from "../auth/session";
 
 /**
  * Render the audited operator action surface.
  *
  * @returns The actions page.
  */
-export default function ActionsPage(): ReactElement {
-  const { snapshot } = load_local_scope();
+export default async function ActionsPage(): Promise<ReactElement> {
+  const { snapshot } = load_workspace_scope(await require_session_principal());
   return (
     <>
       <PageHeader

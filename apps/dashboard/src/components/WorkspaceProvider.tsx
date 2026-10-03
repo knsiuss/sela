@@ -15,7 +15,7 @@ import { parse_authenticated_principal } from "appointment-agent/dist/src/enterp
 import type { AuthenticatedPrincipal } from "appointment-agent/dist/src/enterprise/authorization.js";
 import type { AuditEntry } from "@/domain/audit_timeline";
 import type { OperatorAction } from "@/domain/operator_action_gateway";
-import type { LocalPrincipalClaims } from "@/domain/synthetic_principal";
+import type { PrincipalClaims } from "@/domain/principal_claims";
 import type { WorkspaceSnapshot } from "@/domain/workspace_state";
 import {
   use_workspace_transitions,
@@ -43,14 +43,14 @@ const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 export interface WorkspaceProviderProps {
   snapshot: WorkspaceSnapshot;
   /** Plain claims; re-validated client-side through the real contract. */
-  principal: LocalPrincipalClaims;
+  principal: PrincipalClaims;
   children: ReactNode;
 }
 
 /**
  * Provide the local operator workspace to every view.
  *
- * @param props - Initial snapshot, synthetic claims, and rendered children.
+ * @param props - Initial snapshot, verified claims, and rendered children.
  * @returns The provider element.
  */
 export function WorkspaceProvider(props: WorkspaceProviderProps): ReactNode {

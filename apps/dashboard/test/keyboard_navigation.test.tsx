@@ -16,6 +16,8 @@ import { ConflictBoard } from "../src/components/ConflictBoard";
 import { OperatorActionPanel } from "../src/components/OperatorActionPanel";
 import { QueueBoard } from "../src/components/QueueBoard";
 import { build_test_snapshot, render_workspace, TEST_TENANT_ID } from "./support/render_workspace.js";
+import { stub_authorizer } from "./support/render_workspace.js";
+import { build_fixture_principal } from "./support/fixture_principal.js";
 
 function active_element(): HTMLElement | null {
   return document.activeElement as HTMLElement | null;
@@ -46,7 +48,7 @@ describe("tab order", () => {
 
   it("reaches the pending conflict's propose control by tabbing alone", async () => {
     const user = userEvent.setup();
-    render_workspace(<ConflictBoard tenant_id={TEST_TENANT_ID} />);
+    render_workspace(<ConflictBoard tenant_id={TEST_TENANT_ID} />, "operator", true);
     const reached: string[] = [];
     for (let step = 0; step < 60; step += 1) {
       await user.tab();
@@ -90,7 +92,7 @@ describe("keyboard activation", () => {
 
   it("runs an operator action with the keyboard only", async () => {
     const user = userEvent.setup();
-    render_workspace(<OperatorActionPanel tenant_id={TEST_TENANT_ID} />);
+    render_workspace(<OperatorActionPanel tenant_id={TEST_TENANT_ID} authorize={stub_authorizer(build_fixture_principal(TEST_TENANT_ID, "operator", true))} />, "operator", true);
     await user.selectOptions(screen.getByLabelText("Target"), "conflict-fixture-pending");
     const submit = screen.getByRole("button", { name: "Run action" });
     submit.focus();
@@ -104,7 +106,7 @@ describe("keyboard activation", () => {
 describe("focus management", () => {
   it("moves focus to the status region after a conflict transition", async () => {
     const user = userEvent.setup();
-    render_workspace(<ConflictBoard tenant_id={TEST_TENANT_ID} />);
+    render_workspace(<ConflictBoard tenant_id={TEST_TENANT_ID} />, "operator", true);
     const group = screen.getByRole("group", { name: "conflict-fixture-pending" });
     within(group).getByRole("button", { name: "Reject" }).focus();
     await user.keyboard("{Enter}");
@@ -124,7 +126,7 @@ describe("focus management", () => {
 
   it("moves focus to the status region after an operator action", async () => {
     const user = userEvent.setup();
-    render_workspace(<OperatorActionPanel tenant_id={TEST_TENANT_ID} />);
+    render_workspace(<OperatorActionPanel tenant_id={TEST_TENANT_ID} authorize={stub_authorizer(build_fixture_principal(TEST_TENANT_ID, "operator", true))} />, "operator", true);
     await user.selectOptions(screen.getByLabelText("Target"), "conflict-fixture-pending");
     await user.click(screen.getByRole("button", { name: "Run action" }));
     const status = within(screen.getByRole("region", { name: "Operator actions" })).getByRole("status");
@@ -133,14 +135,14 @@ describe("focus management", () => {
   });
 
   it("does not steal focus on first render", () => {
-    render_workspace(<ConflictBoard tenant_id={TEST_TENANT_ID} />);
+    render_workspace(<ConflictBoard tenant_id={TEST_TENANT_ID} />, "operator", true);
     expect(active_element()).toBe(document.body);
   });
 });
 
 describe("no positive tabindex", () => {
   it("never puts a positive tabindex in the document", () => {
-    const { container } = render_workspace(<><ConflictBoard tenant_id={TEST_TENANT_ID} /><QueueBoard tenant_id={TEST_TENANT_ID} /></>);
+    const { container } = render_workspace(<><ConflictBoard tenant_id={TEST_TENANT_ID} /><QueueBoard tenant_id={TEST_TENANT_ID} /></>, "operator", true);
     const positive = [...container.querySelectorAll("[tabindex]")]
       .filter((node) => Number(node.getAttribute("tabindex")) > 0);
     expect(positive).toHaveLength(0);

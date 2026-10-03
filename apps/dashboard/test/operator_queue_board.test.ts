@@ -13,7 +13,8 @@ import {
   type QueueItem,
 } from "../src/domain/operator_queue_board.js";
 import { create_workspace_fixture, FIXTURE_TENANT_ID } from "../src/domain/fixtures.js";
-import { build_local_principal, type LocalPrincipalClaims, to_wire_principal } from "../src/domain/synthetic_principal.js";
+import { build_fixture_claims } from "./support/fixture_principal.js";
+import type { PrincipalClaims } from "../src/domain/principal_claims.js";
 
 const NOW_MS = Date.parse("2026-03-02T09:00:00.000Z");
 const NOW = new Date(NOW_MS);
@@ -25,7 +26,7 @@ function item(item_id: string): QueueItem {
 }
 
 function principal(role: "operator" | "analyst" | "owner" = "operator") {
-  const claims: LocalPrincipalClaims = to_wire_principal(build_local_principal(FIXTURE_TENANT_ID, role));
+  const claims: PrincipalClaims = build_fixture_claims(FIXTURE_TENANT_ID, role);
   return parse_authenticated_principal(claims);
 }
 

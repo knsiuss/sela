@@ -2,11 +2,21 @@ import type { Metadata, Viewport } from "next";
 import type { ReactElement, ReactNode } from "react";
 import "./globals.css";
 import { AppShell } from "@/components/AppShell";
-import { load_local_scope } from "./local_scope";
+import { AuthRequiredNotice } from "@/components/AuthRequiredNotice";
+import { load_workspace_scope } from "./local_scope";
+import { optional_session_principal } from "./auth/session";
+
+/**
+ * The workspace is rendered only for an authenticated staff session. Reading the
+ * session cookie makes every route dynamic on purpose: a prerendered dashboard
+ * would be an unauthenticated dashboard, which is precisely what this change
+ * removes.
+ */
+export const dynamic = "force-dynamic";
 
 const METADATA: Metadata = {
-  title: "Operator workspace (local only)",
-  description: "Local, unauthenticated operator workspace for the appointment agent.",
+  title: "Operator workspace",
+  description: "Authenticated operator workspace for the appointment agent.",
   robots: { index: false, follow: false },
 };
 
@@ -32,13 +42,23 @@ export interface RootLayoutProps {
 }
 
 /**
- * Render the document shell and hand the workspace state to {@link AppShell}.
+ * Render the document shell, requiring a verified staff session.
  *
  * @param props - Page content supplied by the router.
- * @returns The root layout element.
+ * @returns The root layout element, or a refusal when no session is present.
  */
-export default function RootLayout(props: RootLayoutProps): ReactElement {
-  const scope = load_local_scope();
+export default async function RootLayout(props: RootLayoutProps): Promise<ReactElement> {
+  const principal = await optional_session_principal();
+  if (principal === null) {
+    return (
+      <html lang="en">
+        <body>
+          <AuthRequiredNotice />
+        </body>
+      </html>
+    );
+  }
+  const scope = load_workspace_scope(principal);
   return (
     <html lang="en">
       <body>

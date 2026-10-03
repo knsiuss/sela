@@ -18,6 +18,8 @@ import { ConflictBoard } from "../src/components/ConflictBoard";
 import { OperatorActionPanel } from "../src/components/OperatorActionPanel";
 import { QueueBoard } from "../src/components/QueueBoard";
 import { build_test_snapshot, render_workspace, TEST_TENANT_ID } from "./support/render_workspace.js";
+import { stub_authorizer } from "./support/render_workspace.js";
+import { build_fixture_principal } from "./support/fixture_principal.js";
 
 function is_disabled(element: HTMLElement): boolean {
   return (element as HTMLButtonElement).disabled === true;
@@ -90,7 +92,7 @@ describe("ConflictBoard", () => {
 
   it("accepts a proposed resolution", async () => {
     const user = userEvent.setup();
-    render_workspace(<ConflictBoard tenant_id={TEST_TENANT_ID} />);
+    render_workspace(<ConflictBoard tenant_id={TEST_TENANT_ID} />, "operator", true);
     await user.click(within(screen.getByRole("group", { name: "conflict-fixture-proposed" })).getByRole("button", { name: "Accept resolution" }));
     expect(within(screen.getByRole("group", { name: "conflict-fixture-proposed" })).getByText("Accepted")).toBeTruthy();
     expect(text_of(within(screen.getByRole("region", { name: "Conflict resolution" })).getByRole("status"))).toContain("1 of 5 conflicts await a decision.");
@@ -172,7 +174,7 @@ describe("QueueBoard", () => {
 describe("OperatorActionPanel", () => {
   it("offers every audited action and blocks one the role cannot run", async () => {
     const user = userEvent.setup();
-    render_workspace(<OperatorActionPanel tenant_id={TEST_TENANT_ID} />);
+    render_workspace(<OperatorActionPanel tenant_id={TEST_TENANT_ID} authorize={stub_authorizer(build_fixture_principal(TEST_TENANT_ID, "operator", true))} />, "operator", true);
     for (const action of ["resolve_conflict", "release_hold", "reconcile_orphan", "replay_outbound", "export_audit"]) {
       expect(screen.getByRole("option", { name: action })).toBeTruthy();
     }
@@ -184,7 +186,7 @@ describe("OperatorActionPanel", () => {
 
   it("succeeds for a permitted action and appends one audit entry", async () => {
     const user = userEvent.setup();
-    render_workspace(<><OperatorActionPanel tenant_id={TEST_TENANT_ID} /><AuditTimeline /></>);
+    render_workspace(<><OperatorActionPanel tenant_id={TEST_TENANT_ID} authorize={stub_authorizer(build_fixture_principal(TEST_TENANT_ID, "operator", true))} /><AuditTimeline /></>, "operator", true);
     await user.selectOptions(screen.getByLabelText("Target"), "conflict-fixture-pending");
     await user.click(screen.getByRole("button", { name: "Run action" }));
     const item = await within(screen.getByRole("region", { name: "Audit timeline" })).findByRole("listitem");
@@ -193,14 +195,14 @@ describe("OperatorActionPanel", () => {
   });
 
   it("uses a bounded reason code instead of a free-text field", () => {
-    render_workspace(<OperatorActionPanel tenant_id={TEST_TENANT_ID} />);
+    render_workspace(<OperatorActionPanel tenant_id={TEST_TENANT_ID} authorize={stub_authorizer(build_fixture_principal(TEST_TENANT_ID, "operator", true))} />, "operator", true);
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.getAllByRole("option", { name: "operator_verified" }).length).toBeGreaterThan(0);
   });
 
   it("refuses to run without a target", async () => {
     const user = userEvent.setup();
-    render_workspace(<OperatorActionPanel tenant_id={TEST_TENANT_ID} />);
+    render_workspace(<OperatorActionPanel tenant_id={TEST_TENANT_ID} authorize={stub_authorizer(build_fixture_principal(TEST_TENANT_ID, "operator", true))} />, "operator", true);
     await user.click(screen.getByRole("button", { name: "Run action" }));
     expect(text_of(within(screen.getByRole("region", { name: "Operator actions" })).getByRole("status"))).toContain("operator-action-target-required");
   });
@@ -215,7 +217,7 @@ describe("AuditTimeline", () => {
 
   it("renders only the projected, redacted audit fields", async () => {
     const user = userEvent.setup();
-    render_workspace(<><OperatorActionPanel tenant_id={TEST_TENANT_ID} /><AuditTimeline /></>);
+    render_workspace(<><OperatorActionPanel tenant_id={TEST_TENANT_ID} authorize={stub_authorizer(build_fixture_principal(TEST_TENANT_ID, "operator", true))} /><AuditTimeline /></>, "operator", true);
     await user.selectOptions(screen.getByLabelText("Target"), "queue-fixture-unassigned");
     await user.selectOptions(screen.getByLabelText("Reason code"), "calendar_recovered");
     await user.click(screen.getByRole("button", { name: "Run action" }));
@@ -231,7 +233,7 @@ describe("AuditTimeline", () => {
 
   it("keeps a blocked action unsubmittable, so no unaudited attempt is possible", async () => {
     const user = userEvent.setup();
-    render_workspace(<OperatorActionPanel tenant_id={TEST_TENANT_ID} />);
+    render_workspace(<OperatorActionPanel tenant_id={TEST_TENANT_ID} authorize={stub_authorizer(build_fixture_principal(TEST_TENANT_ID, "operator", true))} />);
     await user.selectOptions(screen.getByLabelText("Action"), "replay_outbound");
     expect(is_disabled(screen.getByRole("button", { name: "Run action" }))).toBe(true);
     expect(text_of(within(screen.getByRole("region", { name: "Operator actions" })).getByRole("status")))
@@ -240,7 +242,7 @@ describe("AuditTimeline", () => {
 
   it("reports how many entries were added during the session", async () => {
     const user = userEvent.setup();
-    render_workspace(<><OperatorActionPanel tenant_id={TEST_TENANT_ID} /><AuditTimeline /></>);
+    render_workspace(<><OperatorActionPanel tenant_id={TEST_TENANT_ID} authorize={stub_authorizer(build_fixture_principal(TEST_TENANT_ID, "operator", true))} /><AuditTimeline /></>, "operator", true);
     await user.selectOptions(screen.getByLabelText("Target"), "conflict-fixture-pending");
     await user.click(screen.getByRole("button", { name: "Run action" }));
     const timeline = screen.getByRole("region", { name: "Audit timeline" });

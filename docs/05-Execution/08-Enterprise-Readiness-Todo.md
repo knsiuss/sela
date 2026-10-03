@@ -309,14 +309,14 @@ Provider source of truth:
 
 ## P2.1 Identity and access management
 
-- [~] Select enterprise identity provider.
+- [x] Select enterprise identity provider (owner decision, Sept 2026): Supabase Auth as OIDC provider and Google as a second provider with optional Workspace domain restriction; both are configured and both fail closed when incomplete).
 - [x] Implement an RS256 OIDC JWT verifier with issuer/audience/JWKS/session/MFA validation.
 - [x] Implement MFA claims and least-privilege RBAC for owner/admin/operator/support/analyst/developer.
-- [ ] Implement user lifecycle: invite, activate, suspend, revoke.
+- [~] Implement user lifecycle: invite, activate, suspend, revoke. The state machine and `is_active_user` gate session establishment, but the membership source is configuration-backed rather than a durable user store.
 - [ ] Implement organization → tenant → location hierarchy.
 - [x] Add API boundary with tenant membership and privileged-action MFA checks.
 - [ ] Add API keys with explicit scopes and expiry.
-- [ ] Add session revocation and device history.
+- [x] Add session revocation and device history (verified: revocation actually revokes, only a hash of the cookie secret is stored, and the logout route revokes server-side).
 - [x] Add privileged-action audit contract for destructive operations.
 - [ ] Add access-review reporting.
 
@@ -355,14 +355,13 @@ completion, and focus management; `test/redaction.test.tsx` asserts no customer 
 payload or rendered surface; `test/appointments_view.test.ts` and `test/fixtures.test.ts` prove foreign
 tenant rows are filtered and counted.
 
-**Not done and deliberately so:** the interface has **no authentication**, holds only synthetic
-fixtures, and resolves its tenant and role on the server (`DASHBOARD_LOCAL_TENANT_ID`,
-`DASHBOARD_LOCAL_ROLE`, default role `operator`) so the browser cannot widen its own scope. Per the P2
-audit it must not be exposed beyond local development until server wiring, database row-level
-security, and the OIDC authentication path land; the dev and start scripts pin the bind to
-`127.0.0.1`. One domain gap was found and left for the wiring work: `OperatorActionService.execute`
-calls `normalize_request` outside its audited try/catch, so a malformed request produces no audit row.
-The UI cannot construct one because reason codes are a bounded select rather than free text.
+**Not done and deliberately so:** the interface is **no longer unauthenticated** — staff sign in through an OAuth authorization-code flow (Supabase Auth or Google), the workspace refuses to render without a verified session, and every operator mutation is authorized on the server against the session-derived principal. What is still missing is server-owned data: operator actions execute in the browser against a local in-memory fixture and audit adapter, so the row-level security and durable audit ledger that RB-12 assumes do not exist yet. Per the P2 audit the dev and start scripts therefore still pin the bind to `127.0.0.1`, and nothing in `next.config.mjs` may add a `0.0.0.0` bind, a public `hostname`, or a tunnel. That constraint is authentication-independent: it is released by moving action execution and data ownership to the server, not by adding a login. The domain gap noted earlier still stands: `OperatorActionService.execute` calls `normalize_request` outside its audited try/catch, so a malformed request produces no audit row. The UI cannot construct one because reason codes are a bounded select rather than free text.
+
+**Staff sign-in evidence (Sept 2026).** One authorization-code implementation in `apps/appointment-agent/src/enterprise/oauth/` serves both staff login and Calendar consent: a cryptographically random single-use `state` bound to purpose, provider, tenant, and an allow-listed return path and stored hashed; PKCE S256 on both flows; `nonce` validated against the ID token; and a `redirect_uri` allow-list that refuses rather than reflects. Sessions are `HttpOnly`, `SameSite=Lax`, `Secure` with a `__Host-` prefix outside the explicit loopback opt-in, short-lived, rotated per login, and revocable through the existing `session_registry` contract; only a SHA-256 hash of the cookie secret is stored. MFA is derived from `aal2` or a recognised `amr` entry and is never asserted by the client — the previous synthetic principal that hard-coded `has_mfa: true` is deleted, and privileged actions now fail closed without verified MFA. Google Calendar refresh tokens are encrypted at rest with the existing overlap key ring, bound per tenant and purpose so a copied row fails to decrypt, mapped to the authorizing staff subject and the provider's opaque account id, and revocable on both sides.
+
+Verified evidence: `pnpm typecheck` and `pnpm build` green monorepo-wide (21/21 and 12/12); `pnpm test` green (20/20 tasks; appointment-agent 777 passing across 88 files, dashboard 287 across 20, `@repo/mcp-gcal` 19). `test/enterprise_oauth_state.test.ts` covers missing, malformed, forged, expired, and replayed state plus purpose/provider/tenant binding; `test/enterprise_oauth_redirect.test.ts` covers the allow-list, prefix-confusion, and traversal refusals; `test/enterprise_staff_session.test.ts` covers cookie attributes, revocation actually revoking, and the MFA-gated privileged action failing closed; `test/enterprise_staff_auth_flow.test.ts` runs a full authorize → callback → session → authorized round trip against a local fake IdP that signs real RS256 ID tokens, serves a real JWKS, and enforces PKCE by recomputing the challenge; `test/enterprise_google_token_grants.test.ts` asserts the plaintext refresh token is absent from stored rows, that cross-tenant decryption fails, and that the audit sink carries no token, subject, or email. A live `next start` run confirms unauthenticated `/` and `/actions` render only the sign-in notice with no tenant id, fixture row, or navigation; that `/auth/login` emits a Supabase authorize redirect carrying `state`, `code_challenge_method=S256`, and `nonce` with no client secret; that callbacks with no, forged, or malformed state are refused with distinct sanitized codes; that Calendar consent without a session is `401`; that an unsupported provider is `400`; that a cross-origin logout is `403`; and that with no provider configured `/auth/login` is `503`.
+
+**Not yet evidenced:** the full round trip was exercised in-process against a local fake IdP over real RS256/JWKS/PKCE rather than against a live HTTPS IdP, because the verifier is HTTPS-only and this environment has no Supabase project, Google client credentials, or local TLS material. Session, state, and grant stores are in-memory and therefore single-process; a multi-instance deployment must inject shared adapters.
 
 ## P2.3 Enterprise APIs and integrations
 
@@ -372,7 +371,7 @@ The UI cannot construct one because reason codes are a bounded select rather tha
 - [x] Define webhook replay and idempotency semantics in the durable ledger/session contracts.
 - [x] Add tenant-aware API/provider rate limits.
 - [ ] Add API key rotation and revocation.
-- [ ] Complete Google Calendar OAuth and production consent flow.
+- [~] Complete Google Calendar OAuth and production consent flow (authorize → callback → PKCE-verified exchange → encrypted per-tenant refresh-token store → reuse through the existing `mcp-gcal` client; not yet exercised against a live Google project, and the grant store is in-memory).
 - [x] Add provider-specific error contracts for WhatsApp transport and durable ledger.
 - [ ] Select and implement the first PMS/CRM adapter only after the core contract is stable.
 - [x] Add contract tests for core external adapters.

@@ -18,8 +18,11 @@ import { AuditTimeline } from "../src/components/AuditTimeline";
 import { ConflictBoard } from "../src/components/ConflictBoard";
 import { OperatorActionPanel } from "../src/components/OperatorActionPanel";
 import { QueueBoard } from "../src/components/QueueBoard";
-import OverviewPage from "../src/app/page";
+import { OverviewView } from "../src/components/OverviewView";
 import { build_test_snapshot, render_workspace, TEST_TENANT_ID } from "./support/render_workspace.js";
+import { stub_authorizer } from "./support/render_workspace.js";
+import { build_fixture_principal } from "./support/fixture_principal.js";
+import { build_fixture_claims } from "./support/fixture_principal.js";
 
 const STYLE_LAYERS: readonly string[] = [
   "src/styles/base.css",
@@ -30,11 +33,11 @@ const STYLE_LAYERS: readonly string[] = [
 
 /** Every route view plus the shell, so the whole workspace is covered. */
 const VIEWS: Readonly<Record<string, () => ReactElement>> = {
-  overview: () => <OverviewPage />,
+  overview: () => <OverviewView scope={{ tenant_id: TEST_TENANT_ID, role: "operator", principal: build_fixture_claims(TEST_TENANT_ID, "operator"), snapshot: build_test_snapshot() }} />,
   appointments: () => <AppointmentTable rows={build_test_snapshot().appointments} tenant_id={TEST_TENANT_ID} />,
   conflicts: () => <ConflictBoard tenant_id={TEST_TENANT_ID} />,
   queue: () => <QueueBoard tenant_id={TEST_TENANT_ID} />,
-  actions: () => <OperatorActionPanel tenant_id={TEST_TENANT_ID} />,
+  actions: () => <OperatorActionPanel tenant_id={TEST_TENANT_ID} authorize={stub_authorizer(build_fixture_principal(TEST_TENANT_ID, "operator", true))} />,
   audit: () => <AuditTimeline />,
 };
 
