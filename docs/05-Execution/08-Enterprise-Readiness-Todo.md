@@ -225,6 +225,19 @@ Provider source of truth:
 
 - https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/send-messages
 
+Local fixture note: the offline fixtures and the local-chat harness now match Meta's
+documented payload shape, where `phone_number_id` exists only at
+`entry[].changes[].value.metadata.phone_number_id`. They previously also wrote a
+top-level `value.phone_number_id`, which masked an ingress tenant-resolution defect
+that read the field from the wrong location; real deliveries returned HTTP 200 with
+no error while queuing nothing. Regression tests now pin the documented shape and
+assert the top-level field is absent.
+
+Still outstanding for P0.8: the live-Meta smoke. Signed inbound text/button/duplicate/
+handoff callbacks, an outbound reply, and delivery-status callback verification
+against a real WABA are still required evidence; no automated test performs a live
+Meta call.
+
 **Done evidence:** Approved template IDs, live smoke-test record, provider test evidence, and support runbook.
 
 ---

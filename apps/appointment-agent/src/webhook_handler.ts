@@ -1,4 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
+import {
+  create_tenant_resolution_tracker,
+  log_incomplete_tenant_resolution,
+} from "./observability/tenant_resolution.js";
+import { extract_channel_account_id } from "./meta/channel_account.js";
 import { extract_outbound_statuses, type ParsedOutboundStatus } from "./outbound/status_events.js";
 import type { OutboundLedgerStore } from "./outbound/outbound_ledger.js";
 import type { MetricsSink } from "./observability/metrics.js";
@@ -213,8 +218,7 @@ function extract_raw_message_nodes(payload: unknown): ParsedWebhookMessage[] {
     for (const change of item["changes"]) {
       if (!is_record(change) || !is_record(change["value"])) continue;
       const value = change["value"];
-      const channel_account_id = value["phone_number_id"];
-      const account_id = typeof channel_account_id === "string" ? channel_account_id : "";
+      const account_id = extract_channel_account_id(value);
       const messages = value["messages"];
       if (!Array.isArray(messages)) continue;
       for (const node of messages) {
@@ -359,7 +363,7 @@ export async function handle_inbound_request(
     : require_recipient_cipher(options.recipient_cipher);
   let duplicate_count = 0;
   let enqueued_count = 0;
-  let unresolved_count = 0;
+  const unresolved = create_tenant_resolution_tracker(options.metrics);
   let status_updated_count = 0;
   let status_duplicate_count = 0;
   let status_ignored_count = 0;
@@ -367,9 +371,10 @@ export async function handle_inbound_request(
   for (const { message, channel_account_id } of messages) {
     const tenant_id = await resolve_tenant(options.tenant_resolver, channel_account_id, options.signal);
     if (tenant_id === null || tenant_id === undefined) {
-      unresolved_count += 1;
+      unresolved.record(channel_account_id);
       continue;
     }
+    unresolved.record_resolved();
 
     const resolved_tenant_id = tenant_id;
     await enforce_rate_limit(options, resolved_tenant_id);
@@ -454,9 +459,10 @@ export async function handle_inbound_request(
   for (const status of statuses) {
     const tenant_id = await resolve_tenant(options.tenant_resolver, status.channel_account_id, options.signal);
     if (tenant_id === null || tenant_id === undefined) {
-      unresolved_count += 1;
+      unresolved.record(status.channel_account_id);
       continue;
     }
+    unresolved.record_resolved();
     await enforce_rate_limit(options, tenant_id);
     try {
       const result = await options.outbound_ledger!.record_status(tenant_id, status.event);
@@ -474,18 +480,30 @@ export async function handle_inbound_request(
       throw new WebhookQueueError(error);
     }
   }
+  log_incomplete_tenant_resolution(request_id, unresolved);
   return {
     request_id,
     received_count: messages.length,
     duplicate_count,
     enqueued_count,
-    unresolved_count,
+    unresolved_count: unresolved.total,
     status_count: statuses.length,
     status_updated_count,
     status_duplicate_count,
     status_ignored_count,
   };
 }
+
+/**
+ * Running tenant-resolution outcome for one delivery.
+ *
+ * A missing channel account and a present-but-unknown channel both end in no
+ * job, but they are different failures: the first means the ingress read the
+ * account out of the wrong place in the payload and the second is a normal
+ * fail-closed unknown channel. They stay separately counted and separately
+ * metered so the first can alert instead of hiding inside `unresolved_count`.
+ */
+
 
 async function enforce_rate_limit(options: InboundRequestOptions, tenant_id: string): Promise<void> {
   if (options.rate_limiter === undefined) return;

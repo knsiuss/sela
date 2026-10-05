@@ -33,7 +33,7 @@ describe("WhatsApp outbound status ingestion", () => {
       entry: [{
         changes: [{
           value: {
-            phone_number_id: "phone-status",
+            metadata: { phone_number_id: "phone-status" },
             statuses: [{
               id: "wamid.status.webhook",
               status: "delivered",

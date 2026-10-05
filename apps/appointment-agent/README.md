@@ -148,8 +148,14 @@ ON CONFLICT (channel, channel_account_id) DO UPDATE
 SET tenant_id = EXCLUDED.tenant_id;
 ```
 
-Ingress resolves that mapping before enqueueing. An unknown channel is counted
-as `unresolved_count`, receives no job, and still returns HTTP 200. Known
+Ingress resolves that mapping before enqueueing. The channel account is read from
+`value.metadata.phone_number_id`, the only location Meta's documented `messages` and
+`statuses` payloads carry it; a top-level `value.phone_number_id` is not part of the
+contract and is ignored. An unknown channel is counted as `unresolved_count`, receives
+no job, and still returns HTTP 200. A channel account that cannot be read at all is a
+separate failure: it increments `webhook_tenant_resolution_total{result="channel_account_missing"}`
+and emits a bounded `webhook_tenant_resolution_incomplete` warning, so an ingress that
+routes nothing cannot hide behind a healthy-looking unknown-channel count. Known
 messages are stored in `inbound_messages` before the PII-free `webhook_jobs`
 row is enqueued. The transient Meta `from` phone is encrypted with AES-256-GCM
 before persistence; neither plaintext nor ciphertext is copied into the job,

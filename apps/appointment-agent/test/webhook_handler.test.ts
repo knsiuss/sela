@@ -22,7 +22,7 @@ const RAW_BODY = JSON.stringify({
       changes: [
         {
           value: {
-            phone_number_id: "phone-handler-test",
+            metadata: { phone_number_id: "phone-handler-test" },
             messages: [
               {
                 id: "wamid.handler-regression",

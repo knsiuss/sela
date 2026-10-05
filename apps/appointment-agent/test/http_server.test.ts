@@ -33,7 +33,7 @@ const VALID_BODY = JSON.stringify({
       changes: [
         {
           value: {
-            phone_number_id: "phone-http-test",
+            metadata: { phone_number_id: "phone-http-test" },
             messages: [
               {
                 id: "wamid.http-test",

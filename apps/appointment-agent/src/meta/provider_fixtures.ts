@@ -1,4 +1,13 @@
-/** Provider-shaped fixtures for the offline Meta integration gate. */
+/**
+ * Provider-shaped fixtures for the offline Meta integration gate.
+ *
+ * Every fixture is pinned to Meta's documented `messages`/`statuses` shape: the
+ * channel account lives in `value.metadata.phone_number_id` and nowhere else.
+ * These fixtures previously also wrote a top-level `value.phone_number_id`,
+ * which silently compensated for an ingress defect that read the field from the
+ * wrong location; that duplication must never return, or a real provider
+ * payload would again resolve no tenant while every local test stayed green.
+ */
 
 import { createHmac } from "node:crypto";
 
@@ -10,6 +19,14 @@ export const FIXTURE_SENDER = "+15550001111";
 
 /** Synthetic channel account used by offline fixtures. */
 export const FIXTURE_PHONE_NUMBER_ID = "100000000000001";
+
+/**
+ * Synthetic business number shown in fixture metadata.
+ *
+ * The 555-01XX block is reserved for fiction, so a fixture or its captured
+ * transcript can never contain a reachable subscriber number.
+ */
+export const FIXTURE_DISPLAY_PHONE_NUMBER = "+15550002222";
 
 /** Delivery status values Meta reports on the statuses webhook. */
 export type FixtureDeliveryStatus = "sent" | "delivered" | "read" | "failed";
@@ -197,8 +214,10 @@ function fixture_envelope(input: {
 }): unknown {
   const value: Record<string, unknown> = {
     messaging_product: "whatsapp",
-    metadata: { phone_number_id: input.phone_number_id },
-    phone_number_id: input.phone_number_id,
+    metadata: {
+      display_phone_number: FIXTURE_DISPLAY_PHONE_NUMBER,
+      phone_number_id: input.phone_number_id,
+    },
   };
   if (input.messages !== undefined) value["messages"] = input.messages;
   if (input.statuses !== undefined) value["statuses"] = input.statuses;

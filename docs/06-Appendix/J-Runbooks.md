@@ -65,7 +65,7 @@ P0.6 evidence: per-tenant Meta credentials resolve at runtime through the secret
 
 1. Confirm `META_SMOKE_ENVIRONMENT=staging`, an approved non-promotional template, a test recipient, and a dedicated staging phone number. Never use a production customer list.
 2. Run `pnpm --filter appointment-agent smoke:meta` for the non-sending phone-number preflight. Record only provider request id/WAMID, safe status codes, and timestamps.
-3. Run the signed webhook fixture and verify inbound text, button, duplicate, handoff, outbound reply, and delivery-status callbacks. Confirm the raw recipient is absent from logs, ledger rows, and metrics.
+3. Run the signed webhook fixture and verify inbound text, button, duplicate, handoff, outbound reply, and delivery-status callbacks. Confirm the raw recipient is absent from logs, ledger rows, and metrics. The fixture matches Meta's documented payload shape, where `phone_number_id` sits at `value.metadata.phone_number_id` only; confirm each delivery resolves a tenant with a non-zero enqueue count, and treat `webhook_tenant_resolution_total{result="channel_account_missing"}` as an alerting condition rather than a normal unknown channel.
 4. A template send requires `META_SMOKE_ALLOW_SEND=true`; without it the command exits blocked. For rate-limit or revoked-token tests, use a dedicated test tenant and preserve the safe error code.
 5. If the provider returns `130429` or a timeout, stop the send loop, inspect tenant fairness and the account throughput tier, and reconcile any `unknown` ledger rows before resuming.
 

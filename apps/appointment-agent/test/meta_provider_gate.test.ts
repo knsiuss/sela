@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { is_service_window_open } from "../src/agent_types.js";
 import { InMemoryMessageDedupe } from "../src/ingress/dedupe.js";
+import { MetricsRegistry } from "../src/observability/metrics.js";
 import { InMemoryTenantResolver } from "../src/ingress/tenant_resolver.js";
 import { is_valid_signature } from "../src/ingress/verify.js";
 import {
@@ -127,6 +128,297 @@ describe("P0.8 signed webhook smoke path with live-shaped payloads", () => {
     expect(queue.jobs).toHaveLength(1);
   });
 });
+
+describe("tenant resolution against Meta's documented payload shape", () => {
+  const ACCOUNT_ID = "106540352242922";
+
+  function envelope(value: Record<string, unknown>): string {
+    return JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [{ id: "0", changes: [{ field: "messages", value }] }],
+    });
+  }
+
+  function text_value(metadata: Record<string, unknown> | undefined): Record<string, unknown> {
+    return {
+      messaging_product: "whatsapp",
+      ...(metadata === undefined ? {} : { metadata }),
+      messages: [{
+        from: "15550001111",
+        id: "wamid.shape.text.1",
+        timestamp: "1780000000",
+        type: "text",
+        text: { body: "I want to reschedule my appointment" },
+      }],
+    };
+  }
+
+  it("resolves and enqueues when phone_number_id exists only under metadata", async () => {
+    const queue = queue_spy();
+    const body = envelope(text_value({ display_phone_number: "15550783881", phone_number_id: ACCOUNT_ID }));
+
+    const result = await handle_inbound_request(
+      body,
+      sign_fixture(body, FIXTURE_APP_SECRET),
+      FIXTURE_APP_SECRET,
+      new InMemoryMessageDedupe(),
+      queue,
+      { tenant_resolver: new InMemoryTenantResolver({ [ACCOUNT_ID]: TENANT_ID }) },
+    );
+
+    expect(result).toMatchObject({ received_count: 1, enqueued_count: 1, unresolved_count: 0 });
+    expect(queue.jobs).toHaveLength(1);
+    expect(queue.jobs[0]).toMatchObject({ tenant_id: TENANT_ID });
+  });
+
+  it("does not resolve a payload whose only phone_number_id sits at the top level", async () => {
+    const queue = queue_spy();
+    const body = envelope({ ...text_value(undefined), phone_number_id: ACCOUNT_ID });
+
+    const result = await handle_inbound_request(
+      body,
+      sign_fixture(body, FIXTURE_APP_SECRET),
+      FIXTURE_APP_SECRET,
+      new InMemoryMessageDedupe(),
+      queue,
+      { tenant_resolver: new InMemoryTenantResolver({ [ACCOUNT_ID]: TENANT_ID }) },
+    );
+
+    expect(result).toMatchObject({ received_count: 1, enqueued_count: 0, unresolved_count: 1 });
+    expect(queue.jobs).toHaveLength(0);
+  });
+
+  it("resolves a statuses callback whose phone_number_id exists only under metadata", async () => {
+    const ledger = new InMemoryOutboundLedgerStore();
+    const claim = await ledger.begin({
+      tenant_id: TENANT_ID,
+      provider: "whatsapp",
+      operation_key: "shape-status-operation",
+      request_fingerprint: "c".repeat(64),
+    });
+    if (claim.kind !== "send") throw new Error("ledger claim setup failed");
+    await ledger.mark_sent({
+      tenant_id: TENANT_ID,
+      provider: "whatsapp",
+      operation_key: "shape-status-operation",
+      lease_token: claim.lease_token,
+      provider_message_id: "wamid.shape.status.1",
+    });
+    const body = envelope({
+      messaging_product: "whatsapp",
+      metadata: { display_phone_number: "15550783881", phone_number_id: ACCOUNT_ID },
+      statuses: [{ id: "wamid.shape.status.1", status: "delivered", timestamp: "1780000300" }],
+    });
+
+    const result = await handle_inbound_request(
+      body,
+      sign_fixture(body, FIXTURE_APP_SECRET),
+      FIXTURE_APP_SECRET,
+      new InMemoryMessageDedupe(),
+      queue_spy(),
+      {
+        tenant_resolver: new InMemoryTenantResolver({ [ACCOUNT_ID]: TENANT_ID }),
+        outbound_ledger: ledger,
+      },
+    );
+
+    expect(result).toMatchObject({ status_count: 1, status_updated_count: 1, unresolved_count: 0 });
+    expect(ledger.get(TENANT_ID, "whatsapp", "shape-status-operation")?.status).toBe("delivered");
+  });
+
+  it("does not resolve a statuses callback whose account id sits at the top level", async () => {
+    const ledger = new InMemoryOutboundLedgerStore();
+    const claim = await ledger.begin({
+      tenant_id: TENANT_ID,
+      provider: "whatsapp",
+      operation_key: "shape-status-unknown",
+      request_fingerprint: "d".repeat(64),
+    });
+    if (claim.kind !== "send") throw new Error("ledger claim setup failed");
+    await ledger.mark_sent({
+      tenant_id: TENANT_ID,
+      provider: "whatsapp",
+      operation_key: "shape-status-unknown",
+      lease_token: claim.lease_token,
+      provider_message_id: "wamid.shape.status.2",
+    });
+    const body = envelope({
+      messaging_product: "whatsapp",
+      phone_number_id: ACCOUNT_ID,
+      statuses: [{ id: "wamid.shape.status.2", status: "delivered", timestamp: "1780000300" }],
+    });
+
+    const result = await handle_inbound_request(
+      body,
+      sign_fixture(body, FIXTURE_APP_SECRET),
+      FIXTURE_APP_SECRET,
+      new InMemoryMessageDedupe(),
+      queue_spy(),
+      {
+        tenant_resolver: new InMemoryTenantResolver({ [ACCOUNT_ID]: TENANT_ID }),
+        outbound_ledger: ledger,
+      },
+    );
+
+    expect(result).toMatchObject({ status_count: 1, status_updated_count: 0, unresolved_count: 1 });
+    expect(ledger.get(TENANT_ID, "whatsapp", "shape-status-unknown")?.status).toBe("sent");
+  });
+});
+
+describe("tenant-resolution observability", () => {
+  const ACCOUNT_ID = "106540352242922";
+  const RESOLUTION_METRIC = "webhook_tenant_resolution_total";
+
+  function body_with(value: Record<string, unknown>): string {
+    return JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [{ id: "0", changes: [{ field: "messages", value }] }],
+    });
+  }
+
+  function text_value(extra: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      messaging_product: "whatsapp",
+      metadata: { phone_number_id: ACCOUNT_ID },
+      messages: [{
+        from: "15550001111",
+        id: "wamid.observability.1",
+        timestamp: "1780000000",
+        type: "text",
+        text: { body: "I want to reschedule my appointment" },
+      }],
+      ...extra,
+    };
+  }
+
+  async function deliver(
+    metrics: MetricsRegistry,
+    value: Record<string, unknown>,
+    mappings: Record<string, string> = { [ACCOUNT_ID]: TENANT_ID },
+  ): Promise<void> {
+    const body = body_with(value);
+    await handle_inbound_request(
+      body,
+      sign_fixture(body, FIXTURE_APP_SECRET),
+      FIXTURE_APP_SECRET,
+      new InMemoryMessageDedupe(),
+      queue_spy(),
+      { tenant_resolver: new InMemoryTenantResolver(mappings), metrics },
+    );
+  }
+
+  it("meters a resolved delivery separately from an unreadable channel account", async () => {
+    const resolved_metrics = new MetricsRegistry();
+    await deliver(resolved_metrics, text_value());
+    expect(resolved_metrics.counter_value(RESOLUTION_METRIC, { result: "resolved" })).toBe(1);
+    expect(resolved_metrics.counter_value(RESOLUTION_METRIC, { result: "channel_account_missing" })).toBe(0);
+
+    const missing_metrics = new MetricsRegistry();
+    await deliver(missing_metrics, text_value({ metadata: undefined, phone_number_id: ACCOUNT_ID }));
+    expect(missing_metrics.counter_value(RESOLUTION_METRIC, { result: "channel_account_missing" })).toBe(1);
+    expect(missing_metrics.counter_value(RESOLUTION_METRIC, { result: "resolved" })).toBe(0);
+
+    const unknown_metrics = new MetricsRegistry();
+    await deliver(unknown_metrics, text_value(), { "999999999999999": "77" });
+    expect(unknown_metrics.counter_value(RESOLUTION_METRIC, { result: "unknown_channel" })).toBe(1);
+    expect(unknown_metrics.counter_value(RESOLUTION_METRIC, { result: "resolved" })).toBe(0);
+  });
+
+  it("meters a status callback that cannot resolve its channel account", async () => {
+    const ledger = new InMemoryOutboundLedgerStore();
+    const metrics = new MetricsRegistry();
+    const body = JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [{
+        id: "0",
+        changes: [{
+          field: "messages",
+          value: {
+            messaging_product: "whatsapp",
+            phone_number_id: ACCOUNT_ID,
+            statuses: [{ id: "wamid.observability.status", status: "delivered", timestamp: "1780000300" }],
+          },
+        }],
+      }],
+    });
+
+    const result = await handle_inbound_request(
+      body,
+      sign_fixture(body, FIXTURE_APP_SECRET),
+      FIXTURE_APP_SECRET,
+      new InMemoryMessageDedupe(),
+      queue_spy(),
+      {
+        tenant_resolver: new InMemoryTenantResolver({ [ACCOUNT_ID]: TENANT_ID }),
+        outbound_ledger: ledger,
+        metrics,
+      },
+    );
+
+    expect(result).toMatchObject({ status_count: 1, unresolved_count: 1 });
+    expect(metrics.counter_value(RESOLUTION_METRIC, { result: "channel_account_missing" })).toBe(1);
+  });
+
+  it("logs a bounded warning carrying no account id, tenant id, phone, or body", async () => {
+    const metrics = new MetricsRegistry();
+    const warn_spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    let lines: Record<string, unknown>[] = [];
+    try {
+      await deliver(metrics, text_value({ metadata: undefined, phone_number_id: ACCOUNT_ID }));
+      lines = warn_spy.mock.calls.map((args) => JSON.parse(String(args[0])) as Record<string, unknown>);
+    } finally {
+      warn_spy.mockRestore();
+    }
+
+    expect(lines).toHaveLength(1);
+    // Asserted on the parsed field set, not by substring: the tenant id is a
+    // short numeric string that can also occur inside the random request id.
+    expect(Object.keys(lines[0]!).sort()).toEqual([
+      "event",
+      "reason",
+      "request_id",
+      "unresolved_count",
+    ]);
+    expect(lines[0]).toMatchObject({
+      event: "webhook_tenant_resolution_incomplete",
+      reason: "channel_account_missing",
+      unresolved_count: 1,
+    });
+    expect(String(lines[0]!["request_id"])).toMatch(/^[0-9a-f-]{36}$/u);
+
+    const serialized = JSON.stringify(lines);
+    for (const secret of [ACCOUNT_ID, "15550001111", "I want to reschedule my appointment"]) {
+      expect(metrics.render_prometheus()).not.toContain(secret);
+      expect(serialized).not.toContain(secret);
+    }
+  });
+
+  it("logs nothing when every event resolved", async () => {
+    const metrics = new MetricsRegistry();
+    const warn_spy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const call_count = await count_warnings(warn_spy, () => deliver(metrics, text_value()));
+    expect(call_count).toBe(0);
+  });
+});
+
+/**
+ * Count warning lines emitted while one delivery is handled.
+ *
+ * Captured before the spy is restored, because Vitest clears recorded calls on
+ * restore; reading them afterwards would silently assert against an empty log.
+ *
+ * @param warn_spy - Spy installed on `console.warn`.
+ * @param action - Delivery to run while the spy is active.
+ * @returns Number of warning calls observed during the delivery.
+ */
+async function count_warnings(warn_spy: ReturnType<typeof vi.spyOn>, action: () => Promise<void>): Promise<number> {
+  try {
+    await action();
+    return warn_spy.mock.calls.length;
+  } finally {
+    warn_spy.mockRestore();
+  }
+}
 
 describe("P0.8 delivery-status callbacks against provider shapes", () => {
   async function claimed_ledger(): Promise<InMemoryOutboundLedgerStore> {

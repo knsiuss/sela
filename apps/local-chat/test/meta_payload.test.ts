@@ -46,13 +46,14 @@ describe("text message payload", () => {
     expect(JSON.parse(body)["object"]).toBe("whatsapp_business_account");
   });
 
-  it("carries the channel account where the agent's tenant resolver reads it", () => {
+  it("carries the channel account only where the agent's tenant resolver reads it", () => {
     const value = JSON.parse(serialize(build_meta_text_payload({ ...SHARED, body: "hello" })))
       ["entry"][0]["changes"][0]["value"];
-    // The resolver reads `value.phone_number_id`; the repository's own ingress
-    // fixture carries the id in both `value` and `value.metadata`.
-    expect(value["phone_number_id"]).toBe(SHARED.phone_number_id);
+    // Meta's documented `messages` payload carries the channel account in
+    // `value.metadata` only. A top-level copy would mask an ingress defect that
+    // reads the wrong location, which is why the absence is asserted here too.
     expect(value["metadata"]["phone_number_id"]).toBe(SHARED.phone_number_id);
+    expect(Object.hasOwn(value, "phone_number_id")).toBe(false);
   });
 
   it("carries the current unix second timestamp the worker reads as receipt time", () => {

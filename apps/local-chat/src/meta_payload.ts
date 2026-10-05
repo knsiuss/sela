@@ -3,9 +3,10 @@
  *
  * Every function here is pure and returns the exact bytes the chat tool signs
  * and sends. The shape mirrors what the agent's own `to_inbound_message`
- * accepts, so a payload that survives `parse_inbound_messages` here will be
- * accepted by the real ingress and a rejected one is a genuine protocol
- * mismatch rather than a silently dropped message.
+ * accepts and matches Meta's documented webhook contract, so a payload that
+ * survives `parse_inbound_messages` here will be accepted by the real ingress
+ * and a rejected one is a genuine protocol mismatch rather than a silently
+ * dropped message.
  *
  * PII: the end-user number is a reserved-for-fiction value that is only ever
  * used as a payload field. It is not logged and never reaches the browser.
@@ -124,12 +125,13 @@ function wrap_message(input: MetaMessageBase, message: Record<string, unknown>):
             value: {
               messaging_product: "whatsapp",
               metadata: { display_phone_number: "+15550000000", phone_number_id },
-              // The agent's tenant resolver reads the channel account from the
-              // top level of `value`, and the repository's own ingress fixture
-              // (`meta/provider_fixtures.ts`) carries the id in both places.
-              // Sending it only inside `metadata` would resolve no tenant, and
-              // every message would be counted unresolved and never queued.
-              phone_number_id,
+              // The channel account is written ONLY inside `metadata`, which is
+              // where Meta's documented `messages`/`statuses` payloads carry it
+              // and where the agent's tenant resolver reads it. A top-level
+              // `phone_number_id` is not part of the provider contract: adding
+              // one here made this harness mask a real ingress defect in which
+              // every production delivery resolved no tenant while local runs
+              // stayed green.
               contacts: [{ profile: { name: "Local end user" }, wa_id }],
               messages: [
                 {

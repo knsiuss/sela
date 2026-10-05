@@ -1,5 +1,6 @@
 /** Strict extraction of Meta outbound status events without recipient data. */
 
+import { extract_channel_account_id } from "../meta/channel_account.js";
 import type { OutboundDeliveryStatusEvent } from "./outbound_ledger.js";
 
 /** Status event paired with the phone-number channel needed for tenant lookup. */
@@ -18,7 +19,7 @@ export function extract_outbound_statuses(payload: unknown): ParsedOutboundStatu
       if (!is_record(change) || !is_record(change.value)) continue;
       const value = change.value;
       if (!Array.isArray(value.statuses)) continue;
-      const channel_account_id = typeof value.phone_number_id === "string" ? value.phone_number_id : "";
+      const channel_account_id = extract_channel_account_id(value);
       for (const status of value.statuses) {
         results.push({
           channel_account_id,
