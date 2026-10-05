@@ -166,6 +166,7 @@ export function outcome_for_error(code: OAuthFlowErrorCode): OAuthAuditOutcome {
       return "replayed";
     case "oauth_redirect_not_allowed":
     case "oauth_return_path_invalid":
+    case "oauth_source_rate_limited":
       return "not_allowed";
     case "oauth_membership_unresolved":
     case "oauth_tenant_mismatch":

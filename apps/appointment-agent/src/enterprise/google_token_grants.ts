@@ -34,27 +34,19 @@ import {
   record_oauth_event,
   type OAuthAuditSink,
 } from "./oauth/oauth_audit.js";
+import {
+  InMemoryGoogleTokenGrantRepository,
+  require_grant_tenant_id,
+  type GoogleTokenGrant,
+  type GoogleTokenGrantRepository,
+} from "./oauth/google_grant_repository.js";
 import { OAuthFlowError } from "./oauth/oauth_error.js";
 import type { MetricsSink } from "../observability/metrics.js";
 
+export type { GoogleTokenGrant } from "./oauth/google_grant_repository.js";
+
 /** Cipher context purpose binding for Calendar refresh tokens. */
 export const GOOGLE_TOKEN_PURPOSE = "google_refresh_token";
-
-/** One tenant's stored Calendar grant. */
-export interface GoogleTokenGrant {
-  grant_id: string;
-  tenant_id: string;
-  /** Google account that granted access, as the provider's opaque subject id. */
-  google_subject_id: string;
-  /** Staff subject that completed the consent callback. */
-  authorized_by_subject_id: string;
-  scopes: readonly string[];
-  /** Ciphertext only; the refresh token never exists in this record. */
-  encrypted_refresh_token: string;
-  created_at_iso: string;
-  last_used_at_iso: string | null;
-  revoked_at_iso: string | null;
-}
 
 /** Input for storing a freshly consented refresh token. */
 export interface StoreGoogleGrantInput {
@@ -70,6 +62,15 @@ export interface GoogleGrantStoreOptions {
   sink?: OAuthAuditSink;
   metrics?: MetricsSink;
   clock?: () => Date;
+  /**
+   * Where grants are persisted.
+   *
+   * Defaults to process-local storage, which is correct only while one process
+   * serves consent and revoke together. A multi-instance deployment injects the
+   * Postgres repository; either way the repository only ever receives ciphertext,
+   * so no adapter can be talked into storing a plaintext token.
+   */
+  repository?: GoogleTokenGrantRepository;
   /**
    * Injectable Google-side revoke so tests never touch the network.
    *
@@ -93,13 +94,19 @@ export class GoogleTokenGrantStore {
   private readonly metrics: MetricsSink | undefined;
   private readonly clock: () => Date;
   private readonly revoke_upstream: ((refresh_token: string) => Promise<void>) | undefined;
-  private readonly grants = new Map<string, GoogleTokenGrant>();
+  /**
+   * Persistence, and the only component that sees a stored grant.
+   *
+   * Public so an operator-facing test can read what was actually persisted rather
+   * than the redacted projection `list()` returns.
+   */
+  readonly repository: GoogleTokenGrantRepository;
 
   /**
    * Create the store over an existing tenant-bound cipher.
    *
    * @param cipher - Cipher built from the deployment's overlap key ring.
-   * @param options - Optional audit sink, metrics, clock, and upstream revoke.
+   * @param options - Optional repository, audit sink, metrics, clock, and revoke.
    */
   constructor(cipher: TenantSecretCipher, options: GoogleGrantStoreOptions = {}) {
     this.cipher = cipher;
@@ -107,6 +114,7 @@ export class GoogleTokenGrantStore {
     this.metrics = options.metrics;
     this.clock = options.clock ?? (() => new Date());
     this.revoke_upstream = options.revoke_upstream;
+    this.repository = options.repository ?? new InMemoryGoogleTokenGrantRepository();
   }
 
   /**
@@ -129,9 +137,9 @@ export class GoogleTokenGrantStore {
       last_used_at_iso: null,
       revoked_at_iso: null,
     };
-    this.grants.set(tenant_id, grant);
+    const stored = await this.repository.replace(grant);
     this.audit("calendar_grant_stored", "ok", tenant_id);
-    return { ...grant, scopes: [...grant.scopes] };
+    return { ...stored, scopes: [...stored.scopes] };
   }
 
   /**
@@ -143,13 +151,13 @@ export class GoogleTokenGrantStore {
    */
   async resolve_refresh_token(tenant_id: string): Promise<string> {
     const tenant = require_tenant_id(tenant_id);
-    const grant = this.grants.get(tenant);
-    if (grant === undefined || grant.revoked_at_iso !== null) {
+    const grant = await this.repository.load(tenant);
+    if (grant === undefined || grant === null || grant.revoked_at_iso !== null) {
       this.audit("calendar_grant_stored", "missing", tenant);
       throw new OAuthFlowError("oauth_membership_unresolved");
     }
     const refresh_token = this.open(grant, tenant);
-    grant.last_used_at_iso = this.clock().toISOString();
+    await this.repository.mark_used(tenant, this.clock().toISOString());
     return refresh_token;
   }
 
@@ -161,9 +169,9 @@ export class GoogleTokenGrantStore {
    */
   async mark_unusable(tenant_id: string): Promise<void> {
     const tenant = require_tenant_id(tenant_id);
-    const grant = this.grants.get(tenant);
-    if (grant === undefined) throw new OAuthFlowError("oauth_membership_unresolved");
-    grant.revoked_at_iso = this.clock().toISOString();
+    const grant = await this.repository.load(tenant);
+    if (grant === undefined || grant === null) throw new OAuthFlowError("oauth_membership_unresolved");
+    await this.repository.mark_unusable(tenant, this.clock().toISOString());
     this.audit("calendar_grant_revoked", "revoked", tenant);
   }
 
@@ -193,8 +201,8 @@ export class GoogleTokenGrantStore {
    */
   async revoke_google_grant(tenant_id: string): Promise<boolean> {
     const tenant = require_tenant_id(tenant_id);
-    const grant = this.grants.get(tenant);
-    if (grant === undefined) {
+    const grant = await this.repository.load(tenant);
+    if (grant === undefined || grant === null) {
       this.audit("calendar_grant_revoked", "missing", tenant);
       throw new OAuthFlowError("oauth_membership_unresolved");
     }
@@ -206,14 +214,14 @@ export class GoogleTokenGrantStore {
     try {
       await revoke_upstream(refresh_token);
     } catch {
-      // The credential is still live at Google and still decryptable here, so
-      // the row must survive: this is a retryable failure, not a completed
+      // The credential is still live at Google and still decryptable here, so the
+      // row must survive: this is a retryable failure, not a completed
       // revocation. Collapsing the upstream error keeps the token and any
       // provider wording out of the failure a caller will log or render.
       this.audit("calendar_grant_revoked", "failed", tenant);
       throw new OAuthFlowError("oauth_token_exchange_failed");
     }
-    const was_stored_grant = this.delete_revoked_grant(tenant, revoked_grant_id);
+    const was_stored_grant = await this.repository.delete_if(tenant, revoked_grant_id);
     // `revoked` would be a false audit row when a re-consent replaced the grant:
     // the tenant still holds a credential Google never invalidated. `ok` reports
     // only what is true — the grant this call revoked is no longer resolvable.
@@ -227,12 +235,9 @@ export class GoogleTokenGrantStore {
    * @param tenant_id - Optional tenant filter; omit to list every grant.
    * @returns Grants safe to render in an audit view.
    */
-  list(tenant_id?: string): GoogleTokenGrant[] {
-    const all = [...this.grants.values()];
-    const filtered = tenant_id === undefined ? all : all.filter((grant) => grant.tenant_id === require_tenant_id(tenant_id));
-    return filtered
-      .map((grant) => ({ ...grant, scopes: [...grant.scopes], encrypted_refresh_token: "[redacted]" }))
-      .sort((left, right) => left.tenant_id.localeCompare(right.tenant_id));
+  async list(tenant_id?: string): Promise<GoogleTokenGrant[]> {
+    const all = await this.repository.list(tenant_id);
+    return all.map((grant) => ({ ...grant, scopes: [...grant.scopes], encrypted_refresh_token: "[redacted]" }));
   }
 
   /** Encrypt one refresh token bound to its tenant and purpose. */
@@ -263,21 +268,6 @@ export class GoogleTokenGrantStore {
       throw new OAuthFlowError("oauth_configuration_invalid");
     }
     return this.revoke_upstream;
-  }
-
-  /**
-   * Delete a tenant's grant only while the stored row is still that grant.
-   *
-   * @param tenant_id - Tenant whose row would be retired.
-   * @param grant_id - Identity of the grant whose credential Google just revoked.
-   * @returns True when the stored row was that grant and is now gone; false when
-   * a newer grant already replaced it, in which case that grant is left intact.
-   */
-  private delete_revoked_grant(tenant_id: string, grant_id: string): boolean {
-    const stored = this.grants.get(tenant_id);
-    if (stored === undefined || stored.grant_id !== grant_id) return false;
-    this.grants.delete(tenant_id);
-    return true;
   }
 
   /** Decrypt one grant for its own tenant only. */
@@ -311,10 +301,7 @@ export class GoogleTokenGrantStore {
 
 /** Validate a tenant id without echoing it. */
 function require_tenant_id(value: string): string {
-  if (typeof value !== "string" || !/^[1-9]\d{0,18}$/.test(value)) {
-    throw new OAuthFlowError("oauth_tenant_mismatch");
-  }
-  return value;
+  return require_grant_tenant_id(value);
 }
 
 /** Require a bounded, control-character-free opaque identifier. */

@@ -16,6 +16,7 @@ export type OAuthFlowErrorCode =
   | "oauth_state_expired"
   | "oauth_state_replayed"
   | "oauth_state_capacity"
+  | "oauth_source_rate_limited"
   | "oauth_redirect_not_allowed"
   | "oauth_return_path_invalid"
   | "oauth_pkce_invalid"
@@ -36,6 +37,10 @@ const STATUS_BY_CODE: Readonly<Record<OAuthFlowErrorCode, number>> = Object.free
   oauth_state_expired: 400,
   oauth_state_replayed: 400,
   oauth_state_capacity: 503,
+  // Retryable by construction: the bucket refills, so the caller is told to come
+  // back rather than that the service is broken. Answering 503 here would train
+  // an operator to retry a throttle as if it were an outage.
+  oauth_source_rate_limited: 429,
   oauth_redirect_not_allowed: 400,
   oauth_return_path_invalid: 400,
   oauth_pkce_invalid: 400,

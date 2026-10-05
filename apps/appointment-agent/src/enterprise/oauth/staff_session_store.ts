@@ -121,7 +121,7 @@ export class InMemoryStaffSessionStore implements StaffSessionStore {
    * @throws OAuthFlowError when the principal or TTL is unusable.
    */
   async create(input: CreateStaffSessionInput): Promise<EstablishedStaffSession> {
-    const ttl_ms = bounded_ttl_ms(input?.ttl_seconds);
+    const ttl_ms = staff_session_ttl_ms(input?.ttl_seconds);
     const principal = input?.principal;
     if (principal === undefined || typeof principal.subject_id !== "string" || principal.subject_id.length === 0) {
       throw new OAuthFlowError("oauth_configuration_invalid");
@@ -129,9 +129,8 @@ export class InMemoryStaffSessionStore implements StaffSessionStore {
     if (input.subject_id !== principal.subject_id) throw new OAuthFlowError("oauth_identity_unverified");
     if (input.has_mfa !== principal.has_mfa) throw new OAuthFlowError("oauth_identity_unverified");
     const secret = input.secret ?? issue_session_secret();
-    const session_id = `${secret.session_id}-${hash_session_secret(secret.secret).slice(0, 16)}`;
     const registry_input: RegisterSessionInput = {
-      session_id,
+      session_id: staff_session_registry_id(secret),
       subject_id: principal.subject_id,
       tenant_id: require_primary_tenant(principal),
       device_id: input.device_id,
@@ -164,7 +163,7 @@ export class InMemoryStaffSessionStore implements StaffSessionStore {
     const parsed = parse_session_cookie(cookie_value);
     // The registry key is derived from both halves of the cookie, so an
     // attacker cannot address another session's row with a guessed id.
-    const session_id = `${parsed.session_id}-${hash_session_secret(parsed.secret).slice(0, 16)}`;
+    const session_id = staff_session_registry_id(parsed);
     const record = this.rows.get(session_id);
     if (record === undefined) throw new OAuthFlowError("oauth_session_unavailable");
     if (this.clock() >= record.expires_at_ms) {
@@ -215,7 +214,7 @@ export class InMemoryStaffSessionStore implements StaffSessionStore {
    */
   async revoke_by_cookie(cookie_value: string): Promise<StaffSessionRecord> {
     const parsed = parse_session_cookie(cookie_value);
-    return this.revoke(`${parsed.session_id}-${hash_session_secret(parsed.secret).slice(0, 16)}`);
+    return this.revoke(staff_session_registry_id(parsed));
   }
 
   /**
@@ -256,13 +255,40 @@ export function session_principal(record: StaffSessionRecord): AuthenticatedPrin
   });
 }
 
-/** Validate a TTL in seconds against the session lifetime bounds. */
-function bounded_ttl_ms(ttl_seconds: number): number {
-  if (
-    !Number.isSafeInteger(ttl_seconds) ||
-    ttl_seconds < 300 ||
-    ttl_seconds > 86_400
-  ) {
+/**
+ * Derive the session registry key from a cookie or an issued secret.
+ *
+ * Both halves of the cookie contribute, so a caller cannot address another
+ * session's row with a guessed id. Every store derives the key here: two
+ * derivations would let a logout address a different row than a resolve, which is
+ * exactly the silent revocation failure this store exists to prevent.
+ *
+ * @param secret - Issued secret, or the parsed halves of a cookie value.
+ * @returns The registry session identifier.
+ * @throws OAuthFlowError when a half is missing or malformed.
+ */
+export function staff_session_registry_id(secret: IssuedSessionSecret | { session_id: string; secret: string }): string {
+  const raw = (secret as { secret?: unknown }).secret;
+  const id = (secret as { session_id?: unknown }).session_id;
+  if (typeof raw !== "string" || typeof id !== "string") {
+    throw new OAuthFlowError("oauth_configuration_invalid");
+  }
+  return `${id}-${hash_session_secret(raw).slice(0, 16)}`;
+}
+
+/**
+ * Validate a session TTL against the lifetime bounds.
+ *
+ * Shared with the durable adapter so a TTL that one store accepts is not refused
+ * by the other.
+ *
+ * @param ttl_seconds - Requested session lifetime in seconds.
+ * @returns The lifetime in milliseconds.
+ * @throws OAuthFlowError when the value is not a whole number of seconds in
+ * [300, 86400].
+ */
+export function staff_session_ttl_ms(ttl_seconds: number): number {
+  if (!Number.isSafeInteger(ttl_seconds) || ttl_seconds < 300 || ttl_seconds > 86_400) {
     throw new OAuthFlowError("oauth_configuration_invalid");
   }
   return ttl_seconds * 1_000;

@@ -14,10 +14,46 @@
  * Consumed records are retained for a bounded grace window rather than deleted
  * immediately, so a replay is reported as a replay instead of an unknown state.
  * A sweep removes everything past the grace window.
+ *
+ * Capacity is bounded and, above the bound, degrading rather than total. An
+ * earlier version refused every issuance at the cap, which meant one anonymous
+ * caller repeating `GET /auth/login` could fill the table and hold it full for
+ * the whole TTL: the store failed closed, but for every user rather than for the
+ * flood. The store now evicts the oldest still-unconsumed record to make room,
+ * and keeps the refusal for the one case eviction cannot fix (below).
+ *
+ * Eviction cannot weaken the CSRF control, which is the property that makes
+ * dropping a still-valid record acceptable:
+ *
+ * - An evicted record is *gone*, so its callback fails closed with
+ *   `oauth_state_unknown`. No session is created and no token is exchanged, which
+ *   is strictly more restrictive than the state having been present.
+ * - Absence cannot be turned into a success later, because nothing re-creates the
+ *   record: a replayed or evicted value is refused on every subsequent attempt.
+ * - Consumed records inside their replay-grace window are never eviction
+ *   candidates, so a replay is still reported as a replay rather than
+ *   indistinguishable from an unknown value.
+ *
+ * Legitimate callbacks are protected by admission control in front of the store
+ * rather than by eviction order: a bounded per-source rate means a source cannot
+ * mint enough records to push a real operator's flow out of the table in the
+ * first place.
+ *
+ * Minting and field validation live in `oauth_state_minter`; this module owns the
+ * record shape, the port, and the process-local store.
  */
 
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import { OAuthFlowError } from "./oauth_error.js";
+import { OAuthStateMinter, hash_state, require_state_value } from "./oauth_state_minter.js";
+
+export {
+  DEFAULT_OAUTH_STATE_TTL_SECONDS,
+  MAX_OAUTH_STATE_TTL_SECONDS,
+  OAuthStateMinter,
+  hash_state,
+  require_state_value,
+} from "./oauth_state_minter.js";
 
 /** Why a flow was started; a state may not be reused across purposes. */
 export type OAuthFlowPurpose = "staff_login" | "calendar_consent";
@@ -25,14 +61,15 @@ export type OAuthFlowPurpose = "staff_login" | "calendar_consent";
 /** Identity providers this product can authenticate staff against. */
 export type StaffIdentityProvider = "supabase" | "google";
 
-/** Default and maximum lifetime of a state record. */
-export const DEFAULT_OAUTH_STATE_TTL_SECONDS = 300;
-export const MAX_OAUTH_STATE_TTL_SECONDS = 600;
 const REPLAY_GRACE_MS = 60_000;
-const STATE_ENTROPY_BYTES = 32;
-const STATE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-const RETURN_PATH_PATTERN = /^\/[A-Za-z0-9][A-Za-z0-9/_-]{0,127}$/;
 const MAX_IN_FLIGHT = 10_000;
+/**
+ * Smallest consumed prefix worth reclaiming from the sweep queue.
+ *
+ * Compacted only once the cursor is both past this floor and past half the
+ * array, so the splice cost is amortized instead of paid on every expiry.
+ */
+const SWEEP_COMPACT_FLOOR = 1_024;
 
 /** One pending authorization request; carries the PKCE verifier and nonce. */
 export interface OAuthStateRecord {
@@ -85,35 +122,67 @@ export interface OAuthStateStore {
  */
 export class InMemoryOAuthStateStore implements OAuthStateStore {
   private readonly records = new Map<string, OAuthStateRecord>();
+  /**
+   * Hashes of retained records that have not been claimed yet, in issuance order.
+   *
+   * `Set` iteration order is insertion order, so the first live entry is the
+   * oldest in-flight flow. Keeping this separate from `records` is what makes
+   * eviction an O(1) head scan instead of a full scan of every consumed record.
+   */
+  private readonly pending = new Set<string>();
+  /**
+   * Every retained record's hash, in issuance order.
+   *
+   * All records share one TTL, so this order is also expiry order and the sweep
+   * can stop at the first record still inside its grace window. That matters
+   * because the sweep runs on every issuance and every claim: a linear scan of
+   * all records per request would make the table's own size the cost of the next
+   * request, which is the amplification this store exists to bound.
+   */
+  private readonly order: string[] = [];
+  private sweep_cursor = 0;
+  private evicted = 0;
+  private readonly max_in_flight: number;
+  private readonly minter: OAuthStateMinter;
   private readonly clock: () => number;
-  private readonly ttl_ms: number;
-  private readonly random: () => Buffer;
 
   /**
    * Create the store.
    *
-   * @param options - Optional clock, entropy source, and TTL override.
-   * @throws OAuthFlowError when the TTL is out of bounds.
+   * @param options - Optional clock, entropy source, TTL override, and capacity
+   * override clamped below the hard bound.
+   * @throws OAuthFlowError when the TTL is out of bounds or the capacity is not
+   * a whole number in [1, MAX_IN_FLIGHT].
    */
-  constructor(options: { clock?: () => number; ttl_seconds?: number; random?: () => Buffer } = {}) {
+  constructor(options: { clock?: () => number; ttl_seconds?: number; random?: () => Buffer; max_in_flight?: number } = {}) {
     this.clock = options.clock ?? Date.now;
-    this.ttl_ms = bounded_ttl_ms(options.ttl_seconds ?? DEFAULT_OAUTH_STATE_TTL_SECONDS);
-    this.random = options.random ?? (() => randomBytes(STATE_ENTROPY_BYTES));
-    if (typeof this.random !== "function") throw new OAuthFlowError("oauth_configuration_invalid");
+    this.minter = new OAuthStateMinter(options);
+    this.max_in_flight = bounded_capacity(options.max_in_flight ?? MAX_IN_FLIGHT);
   }
 
   /**
    * Mint one state value and persist only its hash.
+   *
+   * At the capacity bound the oldest unconsumed record is evicted to make room,
+   * so a flood degrades into throttling rather than a table that refuses every
+   * user until its entries expire. The refusal survives for the case eviction
+   * cannot fix: when every retained record is consumed and inside its replay
+   * grace window, dropping one would destroy the replay signal, so issuance fails
+   * closed instead.
    *
    * @param input - Purpose, IdP, tenant, return path, verifier, and nonce.
    * @returns The raw state value, which the caller must place in the redirect.
    * @throws OAuthFlowError when input is malformed or capacity is exhausted.
    */
   async issue(input: IssueOAuthStateInput): Promise<IssuedOAuthState> {
-    const minted = this.build_record(input);
+    const minted = this.minter.build(input);
     this.sweep(minted.record.issued_at_ms);
-    if (this.records.size >= MAX_IN_FLIGHT) throw new OAuthFlowError("oauth_state_capacity");
+    if (this.records.size >= this.max_in_flight && !this.evict_oldest_pending()) {
+      throw new OAuthFlowError("oauth_state_capacity");
+    }
     this.records.set(minted.record.state_hash, minted.record);
+    this.pending.add(minted.record.state_hash);
+    this.order.push(minted.record.state_hash);
     return { state: minted.state, expires_at_ms: minted.record.expires_at_ms };
   }
 
@@ -128,63 +197,46 @@ export class InMemoryOAuthStateStore implements OAuthStateStore {
   async consume(raw_state: unknown): Promise<OAuthStateRecord> {
     const now = this.clock();
     this.sweep(now);
-    if (typeof raw_state !== "string" || raw_state.length === 0) {
-      throw new OAuthFlowError("oauth_state_missing");
-    }
-    if (!STATE_PATTERN.test(raw_state)) throw new OAuthFlowError("oauth_state_malformed");
-    const record = this.find(hash_state(raw_state));
+    const candidate = require_state_value(raw_state);
+    const record = this.find(hash_state(candidate));
     if (record === undefined) throw new OAuthFlowError("oauth_state_unknown");
     if (record.consumed_at_ms !== null) throw new OAuthFlowError("oauth_state_replayed");
     if (now >= record.expires_at_ms) throw new OAuthFlowError("oauth_state_expired");
     const claimed: OAuthStateRecord = { ...record, consumed_at_ms: now };
     this.records.set(claimed.state_hash, claimed);
+    // Claimed records are no longer eviction candidates: their remaining value is
+    // the replay signal, not a slot the store needs.
+    this.pending.delete(claimed.state_hash);
     return claimed;
   }
 
   /**
-   * Build and validate one pending record.
+   * Number of retained records, consumed and in-flight alike.
    *
-   * @param input - Untrusted issuance input from a route handler.
-   * @returns The record to persist plus the raw state, which is returned to the
-   * caller exactly once and never written to storage.
-   * @throws OAuthFlowError when any field is malformed.
+   * Exposed so the memory bound is assertable rather than assumed.
+   *
+   * @returns The current record count.
    */
-  private build_record(input: IssueOAuthStateInput): { record: OAuthStateRecord; state: string } {
-    const purpose = require_purpose(input?.purpose);
-    const idp = require_idp(input?.idp);
-    const return_path = require_return_path(input?.return_path);
-    if (typeof input?.code_verifier !== "string" || input.code_verifier.length < 43 || input.code_verifier.length > 128) {
-      throw new OAuthFlowError("oauth_pkce_invalid");
-    }
-    if (typeof input.nonce !== "string" || input.nonce.length < 16 || input.nonce.length > 256) {
-      throw new OAuthFlowError("oauth_configuration_invalid");
-    }
-    const issued_at_ms = this.clock();
-    const state = this.mint();
-    return {
-      state,
-      record: {
-        state_hash: hash_state(state),
-        purpose,
-        idp,
-        tenant_id: input.tenant_id === null || input.tenant_id === undefined ? null : require_tenant_id(input.tenant_id),
-        return_path,
-        code_verifier: input.code_verifier,
-        nonce: input.nonce,
-        issued_at_ms,
-        expires_at_ms: issued_at_ms + this.ttl_ms,
-        consumed_at_ms: null,
-      },
-    };
+  retained_count(): number {
+    return this.records.size;
   }
 
-  /** Generate one 256-bit state value as unpadded base64url. */
-  private mint(): string {
-    const entropy = this.random();
-    if (!(entropy instanceof Buffer) || entropy.byteLength !== STATE_ENTROPY_BYTES) {
-      throw new OAuthFlowError("oauth_configuration_invalid");
-    }
-    return entropy.toString("base64url");
+  /**
+   * Number of retained records that have not been claimed.
+   *
+   * @returns The current in-flight count.
+   */
+  in_flight_count(): number {
+    return this.pending.size;
+  }
+
+  /**
+   * Number of records dropped to make room since this store was created.
+   *
+   * @returns The eviction count.
+   */
+  evicted_count(): number {
+    return this.evicted;
   }
 
   /** Look up a hash without leaking which prefix matched through timing. */
@@ -197,57 +249,70 @@ export class InMemoryOAuthStateStore implements OAuthStateStore {
     return undefined;
   }
 
-  /** Drop records whose replay grace window has closed. */
-  private sweep(now_ms: number): void {
-    for (const [key, record] of this.records) {
-      if (now_ms - record.expires_at_ms > REPLAY_GRACE_MS) this.records.delete(key);
+  /**
+   * Drop the oldest retained record that has not been claimed.
+   *
+   * Consumed records are skipped deliberately: removing one inside its replay
+   * grace window would turn a replay into an indistinguishable unknown value and
+   * destroy the evidence that the value was already spent.
+   *
+   * @returns True when a slot was reclaimed; false when every retained record is
+   * claimed, in which case the caller must fail closed.
+   */
+  private evict_oldest_pending(): boolean {
+    for (const state_hash of this.pending) {
+      if (!this.records.has(state_hash)) {
+        this.pending.delete(state_hash);
+        continue;
+      }
+      this.records.delete(state_hash);
+      this.pending.delete(state_hash);
+      this.evicted += 1;
+      return true;
     }
+    return false;
+  }
+
+  /**
+   * Drop records whose replay grace window has closed, oldest first.
+   *
+   * The cursor makes this amortized: one pass over the expired prefix, then a
+   * constant-time check per request until new records push the window forward.
+   * `order` is reclaimed once the cursor has consumed enough of it, so the queue
+   * itself does not become the leak it exists to prevent.
+   */
+  private sweep(now_ms: number): void {
+    while (this.sweep_cursor < this.order.length) {
+      const key = this.order[this.sweep_cursor] as string;
+      const record = this.records.get(key);
+      if (record !== undefined && now_ms - record.expires_at_ms <= REPLAY_GRACE_MS) return;
+      if (record !== undefined) this.records.delete(key);
+      this.pending.delete(key);
+      this.sweep_cursor += 1;
+    }
+    this.compact_order();
+  }
+
+  /** Drop the consumed prefix of the sweep queue once it dominates the array. */
+  private compact_order(): void {
+    if (this.sweep_cursor < SWEEP_COMPACT_FLOOR) return;
+    if (this.sweep_cursor * 2 < this.order.length) return;
+    this.order.splice(0, this.sweep_cursor);
+    this.sweep_cursor = 0;
   }
 }
 
-/** SHA-256 hex of a raw state value; the raw value is never stored. */
-function hash_state(raw_state: string): string {
-  return createHash("sha256").update(raw_state, "utf8").digest("hex");
-}
 
-function bounded_ttl_ms(ttl_seconds: number): number {
-  if (
-    !Number.isSafeInteger(ttl_seconds) ||
-    ttl_seconds < 30 ||
-    ttl_seconds > MAX_OAUTH_STATE_TTL_SECONDS
-  ) {
+/**
+ * Clamp a requested capacity to the hard memory bound.
+ *
+ * A smaller value exists so a test can reach the eviction boundary without minting
+ * ten thousand records. It is clamped rather than trusted so no caller, including a
+ * misconfigured deployment, can raise the bound above `MAX_IN_FLIGHT`.
+ */
+function bounded_capacity(max_in_flight: number): number {
+  if (!Number.isSafeInteger(max_in_flight) || max_in_flight < 1 || max_in_flight > MAX_IN_FLIGHT) {
     throw new OAuthFlowError("oauth_configuration_invalid");
   }
-  return ttl_seconds * 1_000;
-}
-
-function require_purpose(value: unknown): OAuthFlowPurpose {
-  if (value !== "staff_login" && value !== "calendar_consent") {
-    throw new OAuthFlowError("oauth_configuration_invalid");
-  }
-  return value;
-}
-
-function require_idp(value: unknown): StaffIdentityProvider {
-  if (value !== "supabase" && value !== "google") throw new OAuthFlowError("oauth_idp_unknown");
-  return value;
-}
-
-function require_tenant_id(value: unknown): string {
-  if (typeof value !== "string" || !/^[1-9]\d{0,18}$/.test(value)) {
-    throw new OAuthFlowError("oauth_tenant_mismatch");
-  }
-  return value;
-}
-
-function require_return_path(value: unknown): string {
-  if (typeof value !== "string" || !RETURN_PATH_PATTERN.test(value)) {
-    throw new OAuthFlowError("oauth_return_path_invalid");
-  }
-  // Re-checked here as well as in `redirect_policy`, because this value is
-  // persisted: a shape that navigates somewhere else must never reach storage.
-  if (value.includes("//") || value.includes("..") || value.includes("\\") || value.endsWith("/")) {
-    throw new OAuthFlowError("oauth_return_path_invalid");
-  }
-  return value;
+  return max_in_flight;
 }

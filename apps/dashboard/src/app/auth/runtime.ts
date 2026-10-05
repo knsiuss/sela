@@ -2,7 +2,7 @@
  * Server-only composition root for staff authentication.
  *
  * Everything the OAuth routes and the workspace layout need is built here, once
- * per process, from environment configuration. Two properties matter:
+ * per process, from environment configuration. Three properties matter:
  *
  * - Nothing falls back to an unauthenticated mode. `runtime()` throws
  *   `oauth_configuration_invalid` when no provider is configured, so a local
@@ -10,14 +10,18 @@
  *   dashboard.
  * - No browser input reaches this module. Tenant, role, and MFA come from a
  *   verified ID token and a directory lookup; the browser only ever supplies a
- *   `return_path` that is checked against a configuration allow-list.
+ *   `return_path` checked against a configuration allow-list, and an opaque
+ *   admission key derived from the request's client address.
+ * - Which stores are built is a decision, not an accident. `runtime()` takes a
+ *   store factory, and the default one builds process-local stores that are
+ *   refused outside loopback; a deployment that injects the Postgres factory
+ *   publishes a dashboard whose states, sessions, and grants are shared between
+ *   instances and survive a restart. See `store_factory`.
  *
- * The in-memory state, session, and grant stores are correct for a single
- * process. Because they are, `runtime()` refuses to start when the configured
- * public origin is not loopback: a second instance would not see a login state,
- * a session revocation, or a grant revoke issued by the first. A multi-instance
- * deployment must inject shared adapters for the three ports, which is why they
- * are ports rather than module-level objects.
+ * Admission control lives here rather than in the routes because both entry
+ * points must have it and a route that forgot would be invisible. A source key is
+ * derived from the request, never logged, and a denial is recorded in the existing
+ * OAuth audit trail and metrics so a flood is visible to alerting.
  *
  * This module imports `node:crypto` and reads the environment, so it must only
  * ever be imported from route handlers and Server Components. Next.js rejects the
@@ -27,38 +31,37 @@
 import { randomBytes } from "node:crypto";
 import {
   InMemoryOAuthAuditSink,
-  InMemoryOAuthStateStore,
-  InMemoryStaffDirectory,
-  InMemoryStaffSessionStore,
   OAuthFlowError,
+  SourceAdmissionLimiter,
   begin_authorization,
   build_staff_principal,
   complete_authorization,
   google_code_exchanger,
-  google_grant_revoker,
-  is_loopback_public_base_url,
   parse_session_cookie,
   parse_staff_auth_config,
-  parse_staff_directory,
+  record_oauth_event,
   require_provider,
   serialize_session_cookie,
   session_principal,
   supabase_code_exchanger,
   type IdProviderConfig,
   type OAuthCallbackParams,
-  type OAuthStateStore,
   type StaffAuthConfig,
-  type StaffSessionStore,
 } from "appointment-agent/dist/src/enterprise/oauth/index.js";
-import { GoogleTokenGrantStore } from "appointment-agent/dist/src/enterprise/google_token_grants.js";
+import type { GoogleTokenGrantStore } from "appointment-agent/dist/src/enterprise/google_token_grants.js";
 import { create_signing_key_set } from "appointment-agent/dist/src/enterprise/oidc_verifier.js";
 import type { SigningKeySet } from "appointment-agent/dist/src/enterprise/oidc_verifier.js";
 import { MetricsRegistry } from "appointment-agent/dist/src/observability/metrics.js";
-import { create_tenant_secret_cipher } from "appointment-agent/dist/src/security/tenant_secret_cipher.js";
 import { parse_recipient_key_ring } from "appointment-agent/dist/src/security/recipient_key_ring.js";
 import type { AuthenticatedPrincipal, EnterpriseRole } from "appointment-agent/dist/src/enterprise/authorization.js";
 import type { PrincipalClaims } from "@/domain/principal_claims";
 import { to_wire_principal } from "@/domain/principal_claims";
+import {
+  assert_store_topology,
+  in_memory_stores,
+  type StaffAuthStoreFactory,
+  type StaffAuthStores,
+} from "./store_factory";
 
 /** Return paths a completed login may navigate to. */
 export const DEFAULT_RETURN_PATHS: readonly string[] = ["/actions", "/audit"];
@@ -69,10 +72,15 @@ const LOGIN_SCOPES: readonly string[] = ["openid", "email", "profile"];
 /** Everything the routes need, resolved once per process. */
 export interface StaffAuthRuntime {
   config: StaffAuthConfig;
-  state_store: OAuthStateStore;
-  session_store: StaffSessionStore;
-  directory: InMemoryStaffDirectory;
-  grants: GoogleTokenGrantStore;
+  /** The stores this process composed, and the topology they support. */
+  stores: StaffAuthStores;
+  /**
+   * Per-source admission limiter for the login and consent entry points.
+   *
+   * Held for the process lifetime so a flood is throttled against one shared
+   * budget rather than a fresh one per request.
+   */
+  admission: SourceAdmissionLimiter;
   /**
    * The one OAuth audit sink for this process.
    *
@@ -81,7 +89,7 @@ export interface StaffAuthRuntime {
    * would silently split the grant half of it away.
    */
   audit: InMemoryOAuthAuditSink;
-  /** Process metrics sink; grant and session events both increment it. */
+  /** Process metrics sink; grant, session, and admission events all increment it. */
   metrics: MetricsRegistry;
   /**
    * One signing-key cache per provider, held for the process lifetime so the
@@ -90,46 +98,53 @@ export interface StaffAuthRuntime {
   key_sets: ReadonlyMap<IdProviderConfig["idp"], SigningKeySet>;
 }
 
+/** Optional composition-time overrides for `runtime`. */
+export interface RuntimeOptions {
+  /**
+   * Builds the auth stores. Defaults to process-local stores.
+   *
+   * Read once, on first composition: a factory is a deployment decision rather
+   * than a per-request one, so changing it requires `reset_runtime()`.
+   */
+  store_factory?: StaffAuthStoreFactory;
+}
+
 let cached_runtime: StaffAuthRuntime | undefined;
+let cached_factory: StaffAuthStoreFactory | undefined;
 
 /**
  * Resolve the process-wide staff authentication runtime.
  *
  * @param env - Environment mapping; defaults to the process environment.
+ * @param options - Optional store factory override.
  * @returns The cached runtime, built on first use.
- * @throws OAuthFlowError when staff authentication is not fully configured, or
- * when the in-memory stores below are combined with a public origin that is not
- * loopback.
+ * @throws OAuthFlowError when staff authentication is not fully configured, when
+ * the composed stores are process-local and the public origin is not loopback, or
+ * when a shared factory is asked for without a database.
  */
-export function runtime(env: Record<string, string | undefined> = process.env): StaffAuthRuntime {
+export function runtime(
+  env: Record<string, string | undefined> = process.env,
+  options: RuntimeOptions = {},
+): StaffAuthRuntime {
   if (cached_runtime !== undefined) return cached_runtime;
   const config = parse_staff_auth_config(env);
-  // The state, session, and grant stores below are single-process, so a second
-  // instance would not see a login state, a session revocation, or a grant
-  // revoke issued by the first. Publishing that beyond loopback turns a
-  // single-use control into a per-instance one, so it is refused at startup
-  // rather than discovered during an incident. A shared adapter replaces these
-  // three ports and removes the restriction.
-  if (!is_loopback_public_base_url(config)) throw new OAuthFlowError("oauth_configuration_invalid");
-  const ring = parse_recipient_key_ring(env);
   // One sink for every OAuth event in the process. Two sinks would leave the
   // grant half of the audit trail unreadable to whoever follows RB-15.
   const audit = new InMemoryOAuthAuditSink();
   const metrics = new MetricsRegistry();
+  const factory = options.store_factory ?? cached_factory ?? in_memory_stores;
+  const stores = factory({ config, env, ring: parse_recipient_key_ring(env), audit, metrics });
+  // The state, session, and grant stores are only as shareable as what the factory
+  // built. Publishing process-local stores beyond loopback turns a single-use
+  // control into a per-instance one, so it is refused at startup rather than
+  // discovered during an incident; a factory that really produced durable
+  // adapters removes the restriction.
+  assert_store_topology(config, stores);
+  cached_factory = factory;
   cached_runtime = {
     config,
-    state_store: new InMemoryOAuthStateStore(),
-    session_store: new InMemoryStaffSessionStore(),
-    directory: parse_staff_directory(env["STAFF_DIRECTORY_JSON"]),
-    grants: new GoogleTokenGrantStore(create_tenant_secret_cipher(ring), {
-      sink: audit,
-      // Without a counter the grant half of `oauth_flow_total` never moves, so a
-      // revoked or refused grant would be invisible to alerting.
-      metrics,
-      // Without a revoker the store refuses to revoke, which would leave a
-      // suspected leak with no way to un-mint the credential at the provider.
-      revoke_upstream: google_grant_revoker(),
-    }),
+    stores,
+    admission: new SourceAdmissionLimiter(config.admission),
     audit,
     metrics,
     key_sets: build_key_sets(config),
@@ -140,6 +155,7 @@ export function runtime(env: Record<string, string | undefined> = process.env): 
 /** Drop the cached runtime. Exposed so tests never inherit ambient config. */
 export function reset_runtime(): void {
   cached_runtime = undefined;
+  cached_factory = undefined;
 }
 
 /** Build one signing-key cache per configured provider. */
@@ -157,21 +173,47 @@ function build_key_sets(config: StaffAuthConfig): ReadonlyMap<IdProviderConfig["
 }
 
 /**
+ * Spend one admission token for a source before any state is minted.
+ *
+ * The denial is recorded rather than merely returned: a source exhausting its
+ * budget is the signal an operator needs to see a flood, and it lands in the same
+ * trail and counter as every other authorization event. The key is never logged —
+ * it is a digest of a client address, and PII does not belong in this trail.
+ *
+ * @param parts - Resolved runtime.
+ * @param source_key - Opaque per-source admission key.
+ * @throws OAuthFlowError when the source has no tokens left.
+ */
+function require_source_admitted(parts: StaffAuthRuntime, source_key: string): void {
+  if (parts.admission.admit(source_key).allowed) return;
+  record_oauth_event(parts.audit, parts.metrics, {
+    event: "authorize_request",
+    outcome: "not_allowed",
+    at: new Date().toISOString(),
+  });
+  throw new OAuthFlowError("oauth_source_rate_limited");
+}
+
+/**
  * Build the authorize redirect for a staff login.
  *
  * @param parts - Resolved runtime.
  * @param idp - Provider the operator chose.
  * @param return_path - Browser-supplied destination, allow-listed here.
+ * @param source_key - Opaque admission key for the requesting source.
  * @returns The absolute IdP URL to redirect to.
- * @throws OAuthFlowError when the provider is disabled or the path is not allowed.
+ * @throws OAuthFlowError when the source is throttled, the provider is disabled,
+ * or the path is not allowed.
  */
 export async function start_login(
   parts: StaffAuthRuntime,
   idp: "supabase" | "google",
   return_path: string,
+  source_key: string,
 ): Promise<{ url: string }> {
   const provider = require_provider(parts.config, idp);
-  const redirect = await begin_authorization(parts.state_store, {
+  require_source_admitted(parts, source_key);
+  const redirect = await begin_authorization(parts.stores.state_store, {
     idp,
     issuer_url: provider.issuer_url,
     client_id: provider.client_id,
@@ -201,7 +243,7 @@ export async function finish_login(
 ): Promise<{ principal: AuthenticatedPrincipal; return_path: string; cookie: string }> {
   const provider = require_provider(parts.config, idp);
   const completed = await complete_authorization(
-    parts.state_store,
+    parts.stores.state_store,
     exchanger_for(provider),
     id_token_options(provider, require_key_set(parts, provider.idp)),
     {
@@ -219,8 +261,8 @@ export async function finish_login(
     issuer: completed.identity.issuer,
     has_mfa: completed.identity.has_mfa,
     issued_at_iso: new Date().toISOString(),
-  }, parts.directory);
-  const session = await parts.session_store.create({
+  }, parts.stores.directory);
+  const session = await parts.stores.session_store.create({
     subject_id: principal.subject_id,
     issuer: completed.identity.issuer,
     idp,
@@ -242,18 +284,22 @@ export async function finish_login(
  * @param parts - Resolved runtime.
  * @param principal - Principal resolved from the session cookie.
  * @param tenant_id - Tenant whose calendar is being connected.
+ * @param source_key - Opaque admission key for the requesting source.
  * @returns The absolute Google consent URL.
- * @throws OAuthFlowError when Google is disabled or the caller lacks the tenant.
+ * @throws OAuthFlowError when the source is throttled, Google is disabled, or the
+ * caller lacks the tenant.
  */
 export async function start_calendar_consent(
   parts: StaffAuthRuntime,
   principal: AuthenticatedPrincipal,
   tenant_id: string,
+  source_key: string,
 ): Promise<{ url: string }> {
   const provider = require_provider(parts.config, "google");
+  require_source_admitted(parts, source_key);
   const roles = principal.tenant_roles[tenant_id];
   if (roles === undefined || roles.length === 0) throw new OAuthFlowError("oauth_tenant_mismatch");
-  const redirect = await begin_authorization(parts.state_store, {
+  const redirect = await begin_authorization(parts.stores.state_store, {
     idp: "google",
     issuer_url: provider.issuer_url,
     client_id: provider.client_id,
@@ -283,7 +329,7 @@ export async function finish_calendar_consent(
 ): Promise<{ tenant_id: string }> {
   const provider = require_provider(parts.config, "google");
   const completed = await complete_authorization(
-    parts.state_store,
+    parts.stores.state_store,
     exchanger_for(provider),
     id_token_options(provider, require_key_set(parts, provider.idp)),
     {
@@ -309,7 +355,7 @@ export async function finish_calendar_consent(
     // durable credential we do not have.
     throw new OAuthFlowError("oauth_token_exchange_failed");
   }
-  await parts.grants.store({
+  await parts.stores.grants.store({
     tenant_id,
     google_subject_id: completed.identity.subject_id,
     authorized_by_subject_id: principal.subject_id,
@@ -333,7 +379,7 @@ export async function principal_from_cookie(
 ): Promise<AuthenticatedPrincipal> {
   if (cookie_value === undefined || cookie_value === "") throw new OAuthFlowError("oauth_session_unavailable");
   const parsed = parse_session_cookie(cookie_value);
-  return session_principal(await parts.session_store.resolve(`${parsed.session_id}.${parsed.secret}`));
+  return session_principal(await parts.stores.session_store.resolve(`${parsed.session_id}.${parsed.secret}`));
 }
 
 /**
@@ -354,7 +400,7 @@ export async function principal_from_cookie(
  * the revoke. The grant stays stored and revocable in either failure case.
  */
 export async function revoke_google_grant(parts: StaffAuthRuntime, tenant_id: string): Promise<boolean> {
-  return parts.grants.revoke_google_grant(tenant_id);
+  return parts.stores.grants.revoke_google_grant(tenant_id);
 }
 
 /**
@@ -370,7 +416,7 @@ export async function revoke_session(
 ): Promise<string> {
   if (cookie_value !== undefined && cookie_value !== "") {
     try {
-      await parts.session_store.revoke_by_cookie(cookie_value);
+      await parts.stores.session_store.revoke_by_cookie(cookie_value);
     } catch {
       // A logout for an already-unknown session still clears the cookie; the
       // operator's intent is satisfied either way.
@@ -431,3 +477,5 @@ function id_token_options(provider: IdProviderConfig, key_set: SigningKeySet) {
 export function new_device_id(): string {
   return randomBytes(16).toString("base64url");
 }
+
+export type { GoogleTokenGrantStore };

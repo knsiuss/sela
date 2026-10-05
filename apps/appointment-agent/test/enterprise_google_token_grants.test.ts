@@ -12,6 +12,7 @@
 import { describe, expect, it } from "vitest";
 import { randomBytes } from "node:crypto";
 import { GoogleTokenGrantStore } from "../src/enterprise/google_token_grants.js";
+import type { GoogleTokenGrant } from "../src/enterprise/oauth/google_grant_repository.js";
 import { create_tenant_secret_cipher } from "../src/security/tenant_secret_cipher.js";
 import { parse_recipient_key_ring } from "../src/security/recipient_key_ring.js";
 import { InMemoryOAuthAuditSink } from "../src/enterprise/oauth/oauth_audit.js";
@@ -82,18 +83,18 @@ function gated_revoker() {
 describe("Google refresh tokens are encrypted at rest", () => {
   it("never stores the plaintext refresh token in any persisted row", async () => {
     const { store } = await store_grant("1001");
-    const stored_rows = read_stored_rows(store);
+    const stored_rows = await read_stored_rows(store);
     expect(stored_rows.length).toBe(1);
     expect(JSON.stringify(stored_rows)).not.toContain(REFRESH_TOKEN);
     // The audit projection is redacted too, and that redaction must not be what
     // makes this assertion pass, so the stored row is checked on its own terms.
     expect(stored_rows[0]?.encrypted_refresh_token).not.toBe(REFRESH_TOKEN);
-    expect(JSON.stringify(store.list("1001"))).toContain("[redacted]");
+    expect(JSON.stringify(await store.list("1001"))).toContain("[redacted]");
   });
 
   it("stores ciphertext that carries the key id and version", async () => {
     const { store } = await store_grant("1001");
-    const stored = store.list("1001")[0];
+    const stored = (await store.list("1001"))[0];
     expect(stored?.encrypted_refresh_token).toBe("[redacted]");
     // Reach past the redacted projection to assert the envelope shape itself.
     const raw = await read_raw_ciphertext(store);
@@ -142,7 +143,7 @@ describe("cross-tenant refresh-token isolation", () => {
 
   it("keeps the tenant-to-account mapping explicit and auditable", async () => {
     const { store } = await store_grant("1001");
-    expect(store.list()).toEqual([
+    expect(await store.list()).toEqual([
       expect.objectContaining({
         tenant_id: "1001",
         google_subject_id: GOOGLE_SUBJECT,
@@ -161,7 +162,7 @@ describe("grant revocation is two-sided", () => {
     await store.store(REFRESH_INPUT("1001"));
     await expect(store.revoke_google_grant("1001")).resolves.toBe(true);
     expect(events).toEqual([`revoked:${REFRESH_TOKEN}`]);
-    expect(store.list()).toEqual([]);
+    expect(await store.list()).toEqual([]);
     await expect(store.resolve_refresh_token("1001")).rejects.toBeInstanceOf(OAuthFlowError);
   });
 
@@ -171,7 +172,7 @@ describe("grant revocation is two-sided", () => {
     await expect(store.revoke_google_grant("1001")).rejects.toMatchObject({ code: "oauth_token_exchange_failed" });
     // The credential is still live at Google, so the only copy that can revoke it
     // must survive; a destroyed row here would strand the operator permanently.
-    expect(store.list()).toHaveLength(1);
+    expect(await store.list()).toHaveLength(1);
     await expect(store.resolve_refresh_token("1001")).resolves.toBe(REFRESH_TOKEN);
   });
 
@@ -180,7 +181,7 @@ describe("grant revocation is two-sided", () => {
     // The store deliberately holds no Google client secret, so it must not
     // pretend a provider-side revoke happened.
     await expect(store.revoke_google_grant("1001")).rejects.toMatchObject({ code: "oauth_configuration_invalid" });
-    expect(store.list()).toHaveLength(1);
+    expect(await store.list()).toHaveLength(1);
     await expect(store.resolve_refresh_token("1001")).resolves.toBe(REFRESH_TOKEN);
   });
 
@@ -209,7 +210,7 @@ describe("a concurrent re-consent cannot be destroyed by an in-flight revoke", (
     // credential Google never revoked, which is the un-revocable state this
     // store exists to prevent.
     await expect(store.resolve_refresh_token("1001")).resolves.toBe("1//0g-second-refresh-token");
-    expect(store.list("1001")).toHaveLength(1);
+    expect(await store.list("1001")).toHaveLength(1);
     const revoke_outcomes = sink.records
       .filter((record) => record.event === "calendar_grant_revoked")
       .map((record) => record.outcome);
@@ -228,7 +229,7 @@ describe("a concurrent re-consent cannot be destroyed by an in-flight revoke", (
     await expect(revoking).resolves.toBe(true);
 
     expect(revoker.calls).toEqual([REFRESH_TOKEN]);
-    expect(store.list()).toEqual([expect.objectContaining({ tenant_id: "2002" })]);
+    expect(await store.list()).toEqual([expect.objectContaining({ tenant_id: "2002" })]);
     await expect(store.resolve_refresh_token("2002")).resolves.toBe("1//0g-other-tenant-token");
   });
 });
@@ -243,7 +244,7 @@ describe("revocation refusals leave audit evidence", () => {
       outcome: "failed",
       tenant_id: "1001",
     }));
-    expect(store.list()).toHaveLength(1);
+    expect(await store.list()).toHaveLength(1);
   });
 });
 
@@ -390,13 +391,12 @@ describe("staff auth configuration fails closed", () => {
  * Read the rows the store actually persisted, past the redacted audit projection.
  *
  * The public `list()` deliberately redacts, so the assertion about what is
- * persisted has to go through the store's own closure state. Reading it the same
- * way an operator would, by inspecting memory, keeps the test honest about which
- * field it is checking.
+ * persisted has to go past it. Reading the injected repository keeps the test
+ * honest about which field it is checking, and it is also the same view an
+ * operator inspecting the database would have.
  */
-function read_stored_rows(store: GoogleTokenGrantStore): { tenant_id: string; encrypted_refresh_token: string }[] {
-  const rows = (store as unknown as { grants: Map<string, { tenant_id: string; encrypted_refresh_token: string }> }).grants;
-  return [...rows.values()];
+async function read_stored_rows(store: GoogleTokenGrantStore): Promise<GoogleTokenGrant[]> {
+  return store.repository.list();
 }
 
 /**
@@ -407,7 +407,7 @@ function read_stored_rows(store: GoogleTokenGrantStore): { tenant_id: string; en
  * @returns The persisted ciphertext envelope.
  */
 async function read_raw_ciphertext(store: GoogleTokenGrantStore, tenant_id = "1001"): Promise<string> {
-  const row = read_stored_rows(store).find((candidate) => candidate.tenant_id === tenant_id);
+  const row = (await read_stored_rows(store)).find((candidate) => candidate.tenant_id === tenant_id);
   if (row === undefined) throw new Error("grant-row-missing");
   return row.encrypted_refresh_token;
 }

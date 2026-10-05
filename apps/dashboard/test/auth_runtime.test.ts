@@ -86,7 +86,7 @@ describe("staff auth composition root", () => {
       revoked.push(new URLSearchParams(String(init?.body ?? "")).get("token") ?? "");
       return new Response("", { status: 200 });
     });
-    await parts.grants.store({
+    await parts.stores.grants.store({
       tenant_id: "1001",
       google_subject_id: "google-subject",
       authorized_by_subject_id: "staff-subject-1",
@@ -96,7 +96,7 @@ describe("staff auth composition root", () => {
     await expect(revoke_google_grant(parts, "1001")).resolves.toBe(true);
     expect(revoked).toEqual(["1//0eXa-refresh-token-value"]);
     expect(String(fetch_spy.mock.calls[0]?.[0])).toBe("https://oauth2.googleapis.com/revoke");
-    expect(parts.grants.list()).toEqual([]);
+    expect(await parts.stores.grants.list()).toEqual([]);
     // RB-15 is answered from this trail, so the grant half has to be in it and
     // not in a second sink the responder never reads.
     expect(parts.audit.records).toContainEqual(expect.objectContaining({
@@ -111,7 +111,7 @@ describe("staff auth composition root", () => {
   it("leaves the grant stored and audited when the composed upstream revoke fails", async () => {
     const parts = loopback_runtime();
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("", { status: 500 }));
-    await parts.grants.store({
+    await parts.stores.grants.store({
       tenant_id: "1001",
       google_subject_id: "google-subject",
       authorized_by_subject_id: "staff-subject-1",
@@ -119,7 +119,7 @@ describe("staff auth composition root", () => {
       refresh_token: "1//0eXa-refresh-token-value",
     });
     await expect(revoke_google_grant(parts, "1001")).rejects.toMatchObject({ code: "oauth_token_exchange_failed" });
-    await expect(parts.grants.resolve_refresh_token("1001")).resolves.toBe("1//0eXa-refresh-token-value");
+    await expect(parts.stores.grants.resolve_refresh_token("1001")).resolves.toBe("1//0eXa-refresh-token-value");
     expect(parts.audit.records).toContainEqual(expect.objectContaining({
       event: "calendar_grant_revoked",
       outcome: "failed",
@@ -134,7 +134,7 @@ describe("staff auth composition root", () => {
       await gate;
       return new Response("", { status: 200 });
     });
-    await parts.grants.store({
+    await parts.stores.grants.store({
       tenant_id: "1001",
       google_subject_id: "google-subject",
       authorized_by_subject_id: "staff-subject-1",
@@ -143,7 +143,7 @@ describe("staff auth composition root", () => {
     });
     const revoking = revoke_google_grant(parts, "1001");
     await Promise.resolve();
-    await parts.grants.store({
+    await parts.stores.grants.store({
       tenant_id: "1001",
       google_subject_id: "google-subject",
       authorized_by_subject_id: "staff-subject-1",
@@ -154,7 +154,7 @@ describe("staff auth composition root", () => {
     // The revoke retires only the credential Google invalidated, so the newer
     // grant stays resolvable and the audit does not claim it was revoked.
     await expect(revoking).resolves.toBe(false);
-    await expect(parts.grants.resolve_refresh_token("1001")).resolves.toBe("1//0eXa-second-refresh-token");
+    await expect(parts.stores.grants.resolve_refresh_token("1001")).resolves.toBe("1//0eXa-second-refresh-token");
     const revoke_records = parts.audit.records.filter((record) => record.event === "calendar_grant_revoked");
     expect(revoke_records.map((record) => record.outcome)).toEqual(["ok"]);
   });

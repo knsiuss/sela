@@ -13,6 +13,9 @@ export {
   DEFAULT_OAUTH_STATE_TTL_SECONDS,
   InMemoryOAuthStateStore,
   MAX_OAUTH_STATE_TTL_SECONDS,
+  OAuthStateMinter,
+  hash_state,
+  require_state_value,
 } from "./oauth_state.js";
 export type {
   IssueOAuthStateInput,
@@ -22,6 +25,15 @@ export type {
   OAuthStateStore,
   StaffIdentityProvider,
 } from "./oauth_state.js";
+export {
+  DEFAULT_SOURCE_ADMISSION_POLICY,
+  SOURCE_ADMISSION_ENV,
+  SourceAdmissionLimiter,
+  parse_source_admission_policy,
+} from "./source_admission.js";
+export type { SourceAdmissionDecision, SourceAdmissionPolicy } from "./source_admission.js";
+export { PostgresOAuthStateStore } from "./postgres_oauth_state_store.js";
+export type { PostgresOAuthStateStoreOptions } from "./postgres_oauth_state_store.js";
 export { PKCE_CHALLENGE_METHOD, derive_code_challenge, generate_pkce_pair, verify_pkce_challenge } from "./pkce.js";
 export type { PkcePair } from "./pkce.js";
 export {
@@ -67,17 +79,30 @@ export {
   serialize_session_cookie,
 } from "./session_cookie.js";
 export type { IssuedSessionSecret, SessionCookieConfig, SessionCookiePolicy } from "./session_cookie.js";
-export { InMemoryStaffSessionStore, session_principal } from "./staff_session_store.js";
+export {
+  InMemoryStaffSessionStore,
+  session_principal,
+  staff_session_registry_id,
+  staff_session_ttl_ms,
+} from "./staff_session_store.js";
 export type {
   CreateStaffSessionInput,
   EstablishedStaffSession,
   StaffSessionRecord,
   StaffSessionStore,
 } from "./staff_session_store.js";
+export { PostgresStaffSessionStore } from "./postgres_staff_session_store.js";
+export type { PostgresStaffSessionStoreOptions } from "./postgres_staff_session_store.js";
+export {
+  InMemoryGoogleTokenGrantRepository,
+  require_grant_tenant_id,
+} from "./google_grant_repository.js";
+export type { GoogleTokenGrant, GoogleTokenGrantRepository } from "./google_grant_repository.js";
 export {
   REDIRECT_ALLOW_LIST_ENV,
   DEFAULT_CALENDAR_SCOPES,
   JWKS_CACHE_MS_ENV,
+  TRUSTED_PROXY_HOPS_ENV,
   is_loopback_public_base_url,
   parse_staff_auth_config,
   require_provider,

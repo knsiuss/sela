@@ -23,6 +23,7 @@ import {
 } from "./redirect_policy.js";
 import { resolve_session_cookie_policy, type SessionCookiePolicy } from "./session_cookie.js";
 import { OAuthFlowError } from "./oauth_error.js";
+import { parse_source_admission_policy, type SourceAdmissionPolicy } from "./source_admission.js";
 import type { StaffIdentityProvider } from "./oauth_state.js";
 
 /** Configuration for one identity provider. */
@@ -78,6 +79,24 @@ export interface StaffAuthConfig {
    * refused at startup instead of being rounded into something believable.
    */
   jwks_cache_ms: number;
+  /**
+   * Per-source admission limits applied to the login and consent entry points.
+   *
+   * These are the control that keeps one anonymous source from filling the state
+   * store, so they are configuration rather than constants: the sustainable login
+   * rate of a deployment differs from an internal console to a busy clinic.
+   */
+  admission: SourceAdmissionPolicy;
+  /**
+   * Number of trusted reverse proxies in front of this deployment.
+   *
+   * Zero means `X-Forwarded-For` is not trusted at all and every direct caller
+   * shares one admission bucket. A positive value is how many proxies append to
+   * that header, which is what lets a proxied deployment bucket per client rather
+   * than per proxy. It is explicit because getting it wrong in the trusting
+   * direction hands an anonymous caller a fresh bucket per request.
+   */
+  trusted_proxy_hops: number;
 }
 
 /** Environment variable holding a comma-separated or JSON redirect list. */
@@ -85,6 +104,9 @@ export const REDIRECT_ALLOW_LIST_ENV = "STAFF_AUTH_REDIRECT_ALLOW_LIST";
 
 /** Environment variable holding the signing-key cache lifetime in seconds. */
 export const JWKS_CACHE_MS_ENV = "STAFF_AUTH_JWKS_CACHE_MS";
+
+/** Environment variable holding the trusted reverse-proxy count. */
+export const TRUSTED_PROXY_HOPS_ENV = "STAFF_AUTH_TRUSTED_PROXY_HOPS";
 
 /** Scopes requested for Calendar; read/write events plus read-only metadata. */
 export const DEFAULT_CALENDAR_SCOPES: readonly string[] = [
@@ -98,6 +120,7 @@ const MAX_PUBLIC_BASE_URL_CHARS = 2048;
 const MIN_JWKS_CACHE_SECONDS = 30;
 const MAX_JWKS_CACHE_SECONDS = 3_600;
 const DEFAULT_JWKS_CACHE_SECONDS = 300;
+const MAX_TRUSTED_PROXY_HOPS = 8;
 const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const HOSTED_DOMAIN_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
 
@@ -136,6 +159,8 @@ export function parse_staff_auth_config(env: Record<string, string | undefined> 
     calendar_scopes: parse_calendar_scopes(env["STAFF_AUTH_CALENDAR_SCOPES_JSON"]),
     session_ttl_seconds: ttl,
     jwks_cache_ms: require_jwks_cache_ms(env[JWKS_CACHE_MS_ENV]),
+    admission: parse_source_admission_policy(env),
+    trusted_proxy_hops: require_trusted_proxy_hops(env[TRUSTED_PROXY_HOPS_ENV]),
   };
 }
 
@@ -394,4 +419,26 @@ function require_jwks_cache_ms(raw: string | undefined): number {
     throw new OAuthFlowError("oauth_configuration_invalid");
   }
   return parsed * 1_000;
+}
+
+/**
+ * Read how many reverse proxies are trusted to append `X-Forwarded-For`.
+ *
+ * Zero is the safe default: an untrusted deployment must not derive an admission
+ * bucket from a header the caller wrote, because that would give one source a
+ * fresh bucket per request.
+ *
+ * @param raw - Raw `STAFF_AUTH_TRUSTED_PROXY_HOPS` value.
+ * @returns The trusted hop count in [0, 8].
+ * @throws OAuthFlowError when the value is present but not an integer in range.
+ */
+function require_trusted_proxy_hops(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return 0;
+  const text = raw.trim();
+  if (!/^\d+$/.test(text)) throw new OAuthFlowError("oauth_configuration_invalid");
+  const parsed = Number(text);
+  if (!Number.isSafeInteger(parsed) || parsed > MAX_TRUSTED_PROXY_HOPS) {
+    throw new OAuthFlowError("oauth_configuration_invalid");
+  }
+  return parsed;
 }
